@@ -99,7 +99,7 @@ BOT.on('location', async (ctx) => {
     }
 
     // Проверяем, не истекла ли дата окончания напоминаний
-    const driver = await db.getDriver(user.driver_id);
+    let driver = await db.getDriver(user.driver_id);
     if (driver && driver.reminder_end_date) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -130,9 +130,11 @@ BOT.on('location', async (ctx) => {
       return;
     }
 
-    // Получаем имя водителя для сообщения админу
-    const drivers = await db.getDrivers();
-    const driver = drivers.find(d => d.id === driverId) || { id: driverId, name: 'Водитель' };
+    // Получаем имя водителя для сообщения админу (если еще не получено)
+    if (!driver) {
+      const drivers = await db.getDrivers();
+      driver = drivers.find(d => d.id === driverId) || { id: driverId, name: 'Водитель' };
+    }
 
     // отправляем координаты админу в телеграм
     if (process.env.ADMIN_CHAT_ID) {
