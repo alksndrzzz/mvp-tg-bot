@@ -1,11 +1,25 @@
-require('dotenv').config();
+// Загружаем .env только если файл существует (для локальной разработки)
+// В Railway переменные окружения уже доступны через process.env
+require('dotenv').config({ override: false });
+
 const { Telegraf, Markup } = require('telegraf');
 const cron = require('node-cron');
 const db = require('./lib/db');
 
-const BOT = new Telegraf(process.env.BOT_TOKEN);
-
+// Логируем для диагностики
+console.log('[BOOT] BOT_TOKEN установлен:', !!process.env.BOT_TOKEN);
+console.log('[BOOT] BOT_TOKEN длина:', process.env.BOT_TOKEN ? process.env.BOT_TOKEN.length : 0);
 console.log('[BOOT] ADMIN_CHAT_ID =', process.env.ADMIN_CHAT_ID || '(not set)');
+console.log('[BOOT] SUPABASE_URL установлен:', !!process.env.SUPABASE_URL);
+
+// Проверяем наличие BOT_TOKEN
+if (!process.env.BOT_TOKEN) {
+  console.error('[ERROR] BOT_TOKEN не установлен! Проверьте переменные окружения в Railway.');
+  console.error('[ERROR] Убедитесь, что переменная BOT_TOKEN добавлена в разделе Variables в Railway.');
+  process.exit(1);
+}
+
+const BOT = new Telegraf(process.env.BOT_TOKEN);
 
 // Тестовая команда: проверить, долетают ли сообщения в админ-чат
 BOT.command('testadmin', async (ctx) => {
