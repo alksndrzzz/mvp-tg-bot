@@ -57,6 +57,8 @@ BOT.start(async (ctx) => {
     console.log('[START] ctx.message.text:', ctx.message.text);
     console.log('[START] Извлеченный token:', token);
     console.log('[START] chat_id:', ctx.chat.id);
+    console.log('[START] Проверка Supabase - URL установлен:', !!process.env.SUPABASE_URL);
+    console.log('[START] Проверка Supabase - KEY установлен:', !!process.env.SUPABASE_ANON_KEY);
     
     if (!token || token.trim() === '') {
       console.log('[START] Токен не предоставлен');
@@ -87,7 +89,10 @@ BOT.start(async (ctx) => {
     await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
     console.log('[START] Приветственное сообщение отправлено, запрос локации отправлен');
   } catch (error) {
-    console.error('[START] Ошибка при обработке /start:', error);
+    console.error('[START] Ошибка при обработке /start:');
+    console.error('[START] Сообщение:', error.message);
+    console.error('[START] Stack:', error.stack);
+    console.error('[START] Полная ошибка:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     await ctx.reply('Произошла ошибка. Попробуйте позже или обратитесь к диспетчеру.');
   }
 });
