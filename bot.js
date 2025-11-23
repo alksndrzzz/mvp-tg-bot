@@ -225,7 +225,20 @@ cron.schedule('40 18 * * *', async () => {
   }
 }, { timezone: TZ });
 
-BOT.launch().then(() => console.log('Bot started (long polling)…'));
+// Обработка ошибки конфликта при запуске нескольких экземпляров
+BOT.launch().then(() => console.log('Bot started (long polling)…'))
+  .catch((error) => {
+    if (error.response?.error_code === 409) {
+      console.error('[ERROR] Конфликт: другой экземпляр бота уже запущен!');
+      console.error('[ERROR] Убедитесь, что на Railway запущен только один экземпляр сервиса.');
+      console.error('[ERROR] Проверьте раздел Deployments и остановите старые деплои.');
+      process.exit(1);
+    } else {
+      console.error('[ERROR] Ошибка при запуске бота:', error);
+      throw error;
+    }
+  });
+
 process.once('SIGINT', () => BOT.stop('SIGINT'));
 process.once('SIGTERM', () => BOT.stop('SIGTERM'));
 
