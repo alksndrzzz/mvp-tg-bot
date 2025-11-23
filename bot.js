@@ -21,11 +21,25 @@ if (!process.env.BOT_TOKEN) {
 
 const BOT = new Telegraf(process.env.BOT_TOKEN);
 
+// Логируем все входящие update'ы для диагностики
+BOT.use(async (ctx, next) => {
+  console.log('[UPDATE] Получен update, type:', ctx.updateType);
+  console.log('[UPDATE] chat_id:', ctx.chat?.id);
+  if (ctx.message) {
+    console.log('[UPDATE] message type:', ctx.message.message_id, ctx.message.from?.id);
+    if (ctx.message.location) {
+      console.log('[UPDATE] ЛОКАЦИЯ обнаружена! latitude:', ctx.message.location.latitude, 'longitude:', ctx.message.location.longitude);
+    }
+  }
+  return next();
+});
+
 // Обработчик ошибок на уровне бота
 BOT.catch((err, ctx) => {
   console.error('[BOT] Необработанная ошибка:', err);
   console.error('[BOT] Update:', JSON.stringify(ctx.update, null, 2));
   console.error('[BOT] chat_id:', ctx.chat?.id);
+  console.error('[BOT] Update type:', ctx.updateType);
   
   // Пытаемся отправить сообщение об ошибке, если это возможно
   if (ctx.chat?.id) {
@@ -58,7 +72,10 @@ const TZ = process.env.TZ || 'Europe/Vilnius';
 const keyboard = Markup.keyboard([
   [Markup.button.locationRequest('📍 Отправить местоположение')],
   ['✅ Маршрут завершён']
-]).resize();
+]).resize().oneTime(false);
+
+// Клавиатура для удаления стандартной кнопки "Старт"
+const removeStartKeyboard = Markup.removeKeyboard();
 
 // /start <token>
 BOT.start(async (ctx) => {
@@ -117,14 +134,15 @@ BOT.start(async (ctx) => {
     await db.setUserActive(ctx.chat.id, driver.id);
     console.log('[START] Пользователь активирован, chat_id:', ctx.chat.id, 'driver_id:', driver.id);
     
-    // Отправляем приветственное сообщение с именем водителя
+    // Отправляем приветственное сообщение с именем водителя и сразу устанавливаем нашу клавиатуру
+    // Это автоматически заменит стандартную кнопку "Старт" на нашу клавиатуру
     try {
       await ctx.reply(
         `Привет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
         keyboard
       );
       
-      // Сразу запрашиваем первую локацию
+      // Сразу запрашиваем первую локацию с той же клавиатурой
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
       console.log('[START] Приветственное сообщение отправлено, запрос локации отправлен');
     } catch (replyError) {
@@ -303,8 +321,6 @@ BOT.on('location', async (ctx) => {
     }
   }
 });
-
-// если текст вместо локации (но не команды)
 BOT.on('text', async (ctx) => {
   // Пропускаем команды (они обрабатываются отдельными обработчиками)
   if (ctx.message.text?.startsWith('/')) {
