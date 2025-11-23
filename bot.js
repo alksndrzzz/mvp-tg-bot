@@ -51,12 +51,41 @@ BOT.start(async (ctx) => {
   try {
     // В Telegraf токен из deep link доступен через ctx.startPayload
     // Также проверяем ctx.message.text на случай, если токен передан как аргумент команды
-    const token = ctx.startPayload || (ctx.message.text || '').split(' ')[1] || '';
+    // В новых версиях Telegraf может быть ctx.message.entities для deep links
+    let token = ctx.startPayload || '';
+    
+    // Если startPayload пустой, пробуем извлечь из текста сообщения
+    if (!token && ctx.message?.text) {
+      const textParts = ctx.message.text.split(' ');
+      if (textParts.length > 1) {
+        token = textParts[1];
+      }
+    }
+    
+    // Также проверяем entities для deep links
+    if (!token && ctx.message?.entities) {
+      for (const entity of ctx.message.entities) {
+        if (entity.type === 'bot_command' && entity.offset === 0) {
+          const commandLength = entity.length;
+          const textAfterCommand = ctx.message.text.substring(commandLength).trim();
+          if (textAfterCommand) {
+            token = textAfterCommand;
+            break;
+          }
+        }
+      }
+    }
+    
+    token = token || '';
+    
     console.log('[START] Получена команда /start');
     console.log('[START] ctx.startPayload:', ctx.startPayload);
-    console.log('[START] ctx.message.text:', ctx.message.text);
+    console.log('[START] ctx.message.text:', ctx.message?.text);
+    console.log('[START] ctx.message.entities:', JSON.stringify(ctx.message?.entities));
     console.log('[START] Извлеченный token:', token);
     console.log('[START] chat_id:', ctx.chat.id);
+    console.log('[START] Проверка Supabase - URL:', process.env.SUPABASE_URL ? 'установлен' : 'НЕ установлен');
+    console.log('[START] Проверка Supabase - KEY:', process.env.SUPABASE_ANON_KEY ? 'установлен' : 'НЕ установлен');
     
     // Проверяем наличие токена ДО обращения к БД
     if (!token || token.trim() === '') {
@@ -65,9 +94,10 @@ BOT.start(async (ctx) => {
     }
 
     console.log('[START] Поиск водителя по токену:', token);
-    const driver = await db.getDriverByToken(token);
+    const driver = await db.getDriverByToken(token.trim());
     if (!driver) {
       console.log('[START] Водитель не найден для токена:', token);
+      console.log('[START] Проверьте, что токен существует в таблице drivers в Supabase');
       return ctx.reply('Ссылка недействительна. Попросите новую у диспетчера.');
     }
 
@@ -99,13 +129,33 @@ BOT.start(async (ctx) => {
     console.error('[START] Stack:', error.stack);
     console.error('[START] Полная ошибка:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     
-    // Не показываем ошибку пользователю, если это просто отсутствие токена
-    const token = ctx.startPayload || (ctx.message.text || '').split(' ')[1] || '';
-    if (!token || token.trim() === '') {
-      return ctx.reply('Нужна персональная ссылка. Попросите диспетчера.', keyboard);
+    // Извлекаем токен для проверки
+    let token = ctx.startPayload || '';
+    if (!token && ctx.message?.text) {
+      const textParts = ctx.message.text.split(' ');
+      if (textParts.length > 1) {
+        token = textParts[1];
+      }
     }
     
-    await ctx.reply('Произошла ошибка. Попробуйте позже или обратитесь к диспетчеру.');
+    // Если токена нет, показываем соответствующее сообщение
+    if (!token || token.trim() === '') {
+      console.log('[START] В catch: токен не найден, показываем сообщение о необходимости ссылки');
+      try {
+        await ctx.reply('Нужна персональная ссылка. Попросите диспетчера.', keyboard);
+      } catch (replyError) {
+        console.error('[START] Ошибка при отправке сообщения:', replyError);
+      }
+      return; // Важно: return чтобы не продолжать выполнение
+    }
+    
+    // Если токен есть, но произошла ошибка - показываем общее сообщение об ошибке
+    console.log('[START] В catch: токен найден, но произошла ошибка при обработке');
+    try {
+      await ctx.reply('Произошла ошибка. Попробуйте позже или обратитесь к диспетчеру.');
+    } catch (replyError) {
+      console.error('[START] Ошибка при отправке сообщения об ошибке:', replyError);
+    }
   }
 });
 
