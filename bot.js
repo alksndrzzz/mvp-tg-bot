@@ -21,6 +21,20 @@ if (!process.env.BOT_TOKEN) {
 
 const BOT = new Telegraf(process.env.BOT_TOKEN);
 
+// Обработчик ошибок на уровне бота
+BOT.catch((err, ctx) => {
+  console.error('[BOT] Необработанная ошибка:', err);
+  console.error('[BOT] Update:', JSON.stringify(ctx.update, null, 2));
+  console.error('[BOT] chat_id:', ctx.chat?.id);
+  
+  // Пытаемся отправить сообщение об ошибке, если это возможно
+  if (ctx.chat?.id) {
+    ctx.reply('Произошла ошибка. Попробуйте позже.').catch((replyErr) => {
+      console.error('[BOT] Не удалось отправить сообщение об ошибке:', replyErr);
+    });
+  }
+});
+
 // Тестовая команда: проверить, долетают ли сообщения в админ-чат
 BOT.command('testadmin', async (ctx) => {
   const id = process.env.ADMIN_CHAT_ID;
@@ -180,12 +194,25 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
 // пришла локация
 BOT.on('location', async (ctx) => {
   try {
+    console.log('[LOCATION] ===== НАЧАЛО ОБРАБОТКИ ЛОКАЦИИ =====');
     console.log('[LOCATION] Получена локация от chat_id:', ctx.chat.id);
+    console.log('[LOCATION] Координаты:', ctx.message.location?.latitude, ctx.message.location?.longitude);
     
     const user = await db.getUser(ctx.chat.id);
+    console.log('[LOCATION] Пользователь из БД:', user ? `найден, active=${user.active}, driver_id=${user.driver_id}` : 'не найден');
+    
     if (!user || !user.active) {
       console.log('[LOCATION] Пользователь не активен, chat_id:', ctx.chat.id);
-      return ctx.reply('Ваш профиль не активен. Зайдите по своей персональной ссылке.');
+      try {
+        await ctx.reply('Ваш профиль не активен. Зайдите по своей персональной ссылке.');
+      } catch (replyError) {
+        if (replyError.response?.error_code === 403) {
+          console.log('[LOCATION] Пользователь заблокировал бота, не отправляем сообщение');
+          return;
+        }
+        throw replyError;
+      }
+      return;
     }
 
     // Проверяем, не истекла ли дата окончания напоминаний
@@ -228,16 +255,52 @@ BOT.on('location', async (ctx) => {
 
     // отправляем координаты админу в телеграм
     if (process.env.ADMIN_CHAT_ID) {
-      const text = `📍 Локация\nВодитель: ${driver.name} (${driver.id})\nКоординаты: ${lat.toFixed(6)}, ${lon.toFixed(6)}\nВремя: ${capturedAt}`;
-      await BOT.telegram.sendMessage(process.env.ADMIN_CHAT_ID, text);
-      console.log('[LOCATION] Уведомление отправлено админу');
+      try {
+        const text = `📍 Локация\nВодитель: ${driver.name} (${driver.id})\nКоординаты: ${lat.toFixed(6)}, ${lon.toFixed(6)}\nВремя: ${capturedAt}`;
+        await BOT.telegram.sendMessage(process.env.ADMIN_CHAT_ID, text);
+        console.log('[LOCATION] Уведомление отправлено админу');
+      } catch (adminError) {
+        console.error('[LOCATION] Ошибка при отправке уведомления админу:', adminError);
+        // Не прерываем выполнение, если не удалось отправить админу
+      }
+    } else {
+      console.log('[LOCATION] ADMIN_CHAT_ID не установлен, пропускаем уведомление админу');
     }
 
-    await ctx.reply('✅ Геопозиция принята. Спасибо!');
-    console.log('[LOCATION] Подтверждение отправлено пользователю');
+    // Отправляем подтверждение пользователю
+    try {
+      await ctx.reply('✅ Геопозиция принята. Спасибо!');
+      console.log('[LOCATION] Подтверждение отправлено пользователю');
+    } catch (replyError) {
+      if (replyError.response?.error_code === 403) {
+        console.log('[LOCATION] Пользователь заблокировал бота, не отправляем подтверждение');
+        return;
+      }
+      throw replyError;
+    }
+    
+    console.log('[LOCATION] ===== ОБРАБОТКА ЛОКАЦИИ ЗАВЕРШЕНА УСПЕШНО =====');
   } catch (error) {
-    console.error('[LOCATION] Ошибка при обработке локации:', error);
-    await ctx.reply('❌ Произошла ошибка при обработке локации. Попробуйте позже.');
+    console.error('[LOCATION] ===== ОШИБКА ПРИ ОБРАБОТКЕ ЛОКАЦИИ =====');
+    console.error('[LOCATION] Сообщение:', error.message);
+    console.error('[LOCATION] Stack:', error.stack);
+    console.error('[LOCATION] Полная ошибка:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    console.error('[LOCATION] chat_id:', ctx.chat.id);
+    
+    try {
+      // Проверяем, не заблокирован ли бот пользователем
+      if (error.response?.error_code === 403) {
+        console.log('[LOCATION] Пользователь заблокировал бота, не отправляем сообщение об ошибке');
+        return;
+      }
+      await ctx.reply('❌ Произошла ошибка при обработке локации. Попробуйте позже.');
+    } catch (replyError) {
+      if (replyError.response?.error_code === 403) {
+        console.log('[LOCATION] Пользователь заблокировал бота, не можем отправить сообщение об ошибке');
+        return;
+      }
+      console.error('[LOCATION] Ошибка при отправке сообщения об ошибке:', replyError);
+    }
   }
 });
 
