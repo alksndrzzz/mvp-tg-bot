@@ -59,9 +59,10 @@ BOT.command('testadmin', async (ctx) => {
 
 // Сбросить свой статус водителя (если случайно активировался)
 BOT.command('resetme', async (ctx) => {
-  const user = await db.getUser(ctx.chat.id);
-  if (user) {
-    await db.setUserPaused(ctx.chat.id);
+  const driver = await db.getDriverByChatId(ctx.chat.id);
+  if (driver) {
+    await db.setDriverInactive(ctx.chat.id);
+    await db.setDriverRouteStatus(driver.id, 'stopped');
     return ctx.reply('Ваш статус сброшен. Вы больше не отмечены как водитель.');
   }
   return ctx.reply('У вас не было статуса водителя.');
@@ -73,6 +74,23 @@ const keyboard = Markup.keyboard([
   [Markup.button.locationRequest('📍 Отправить местоположение')],
   ['✅ Маршрут завершён']
 ]).resize().persistent();
+
+const removeKeyboard = Markup.removeKeyboard();
+
+/**
+ * Унифицированная функция завершения маршрута
+ */
+async function endRoute(chatId, driverId, reason = '') {
+  try {
+    await db.setDriverRouteStatus(driverId, 'stopped');
+    await db.setDriverInactive(chatId);
+    console.log(`[endRoute] Маршрут завершен для driver_id: ${driverId}, chat_id: ${chatId}, причина: ${reason}`);
+    return true;
+  } catch (error) {
+    console.error('[endRoute] Ошибка при завершении маршрута:', error);
+    throw error;
+  }
+}
 
 // /start <token>
 BOT.start(async (ctx) => {
@@ -98,110 +116,88 @@ BOT.start(async (ctx) => {
     console.log('[START] Получена команда /start');
     console.log('[START] ctx.startPayload:', ctx.startPayload);
     console.log('[START] ctx.message.text:', ctx.message?.text);
-    console.log('[START] ctx.message.entities:', JSON.stringify(ctx.message?.entities));
     console.log('[START] Извлеченный token:', token);
     console.log('[START] chat_id:', ctx.chat.id);
-    console.log('[START] Проверка Supabase - URL:', process.env.SUPABASE_URL ? 'установлен' : 'НЕ установлен');
-    console.log('[START] Проверка Supabase - KEY:', process.env.SUPABASE_ANON_KEY ? 'установлен' : 'НЕ установлен');
     
     // Проверяем наличие токена ДО обращения к БД
     if (!token || token.trim() === '') {
       console.log('[START] Токен не предоставлен');
-      return ctx.reply('Нужна персональная ссылка. Попросите диспетчера.', keyboard);
+      return ctx.reply('Нужна персональная ссылка. Попросите диспетчера.', removeKeyboard);
     }
 
     console.log('[START] Поиск водителя по токену:', token);
     const driver = await db.getDriverByToken(token.trim());
     if (!driver) {
       console.log('[START] Водитель не найден для токена:', token);
-      console.log('[START] Проверьте, что токен существует в таблице drivers в Supabase');
-      return ctx.reply('Ссылка недействительна. Попросите новую у диспетчера.');
+      return ctx.reply('Ссылка недействительна. Попросите новую у диспетчера.', removeKeyboard);
     }
 
     console.log('[START] Найден водитель:', driver.name, 'ID:', driver.id, 'Token:', driver.token);
 
     // Проверяем, не используется ли токен другим пользователем
-    const existingUser = await db.getUserByDriverId(driver.id);
-    if (existingUser && existingUser.chat_id !== ctx.chat.id && existingUser.active) {
-      console.log('[START] Токен уже используется другим пользователем:', existingUser.chat_id);
-      return ctx.reply('Эта ссылка уже использована другим пользователем. Попросите новую у диспетчера.');
+    if (driver.telegram_chat_id && driver.telegram_chat_id !== ctx.chat.id && driver.is_active) {
+      console.log('[START] Токен уже используется другим пользователем:', driver.telegram_chat_id);
+      return ctx.reply('Эта ссылка уже использована другим пользователем. Попросите новую у диспетчера.', removeKeyboard);
     }
 
-    // Активируем пользователя
-    await db.setUserActive(ctx.chat.id, driver.id);
-    console.log('[START] Пользователь активирован, chat_id:', ctx.chat.id, 'driver_id:', driver.id);
+    // Проверяем статус маршрута
+    const routeStatus = driver.route_status || 'not-started-yet';
+    console.log('[START] Статус маршрута:', routeStatus);
+
+    // Если маршрут остановлен, сообщаем об этом
+    if (routeStatus === 'stopped') {
+      console.log('[START] Маршрут завершен, сообщаем водителю');
+      return ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+    }
+
+    // Обновляем только telegram_chat_id, НЕ меняем route_status и is_active при /start
+    // Они изменятся при первой отправке локации
+    await db.linkDriverToTelegram(driver.id, ctx.from.id);
+    console.log('[START] Водитель связан с Telegram, chat_id:', ctx.from.id, 'driver_id:', driver.id);
     
-    // Убираем стандартную кнопку "Старт" от Telegram, отправляя сообщение с remove_keyboard
+    // Отправляем приветственное сообщение
     try {
-      await BOT.telegram.sendMessage(ctx.chat.id, ' ', {
+      // Сначала отправляем сообщение с remove_keyboard чтобы убрать стандартную кнопку
+      await BOT.telegram.sendMessage(ctx.chat.id, '⏳', {
         reply_markup: {
           remove_keyboard: true
         }
       });
+      await new Promise(resolve => setTimeout(resolve, 100));
     } catch (err) {
-      // Игнорируем ошибку, если не удалось убрать клавиатуру
       console.log('[START] Не удалось убрать стандартную клавиатуру (это нормально):', err.message);
     }
     
-    // Отправляем приветственное сообщение с именем водителя и устанавливаем нашу клавиатуру
-    // Это заменит стандартную кнопку "Старт" на нашу клавиатуру
-    try {
+    // Если статус not-started-yet, отправляем уведомление о новой поездке
+    if (routeStatus === 'not-started-yet') {
+      await ctx.reply(
+        `🚗 У вас новая поездка!\n\nПривет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
+        keyboard
+      );
+      await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
+    } else {
+      // Обычное приветствие для активного маршрута
       await ctx.reply(
         `Привет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
         keyboard
       );
-      
-      // Сразу запрашиваем первую локацию с той же клавиатурой
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
-      console.log('[START] Приветственное сообщение отправлено, запрос локации отправлен');
-    } catch (replyError) {
-      // Обрабатываем случай, когда пользователь заблокировал бота
-      if (replyError.response?.error_code === 403) {
-        console.log('[START] Пользователь заблокировал бота, но активация прошла успешно');
-        // Пользователь активирован в БД, но не может получить сообщение - это нормально
-        return;
-      }
-      throw replyError; // Пробрасываем другие ошибки
     }
+    
+    console.log('[START] Приветственное сообщение отправлено');
   } catch (error) {
     console.error('[START] Ошибка при обработке /start:');
     console.error('[START] Сообщение:', error.message);
     console.error('[START] Stack:', error.stack);
-    console.error('[START] Полная ошибка:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     
-    // Извлекаем токен для проверки
-    let token = ctx.startPayload || '';
-    if (!token && ctx.message?.text) {
-      const textParts = ctx.message.text.split(' ');
-      if (textParts.length > 1) {
-        token = textParts[1];
-      }
-    }
-    
-    // Если токена нет, показываем соответствующее сообщение
-    if (!token || token.trim() === '') {
-      console.log('[START] В catch: токен не найден, показываем сообщение о необходимости ссылки');
-      try {
-        await ctx.reply('Нужна персональная ссылка. Попросите диспетчера.', keyboard);
-      } catch (replyError) {
-        console.error('[START] Ошибка при отправке сообщения:', replyError);
-      }
-      return; // Важно: return чтобы не продолжать выполнение
-    }
-    
-    // Если токен есть, но произошла ошибка - показываем общее сообщение об ошибке
-    console.log('[START] В catch: токен найден, но произошла ошибка при обработке');
     try {
-      // Проверяем, не заблокирован ли бот пользователем
       if (error.response?.error_code === 403) {
-        console.log('[START] Пользователь заблокировал бота, не отправляем сообщение');
-        return; // Просто выходим, не пытаемся отправить сообщение
+        console.log('[START] Пользователь заблокировал бота');
+        return;
       }
-      await ctx.reply('Произошла ошибка. Попробуйте позже или обратитесь к диспетчеру.');
+      await ctx.reply('Произошла ошибка. Попробуйте позже или обратитесь к диспетчеру.', removeKeyboard);
     } catch (replyError) {
-      // Если и это сообщение не удалось отправить (например, бот заблокирован)
       if (replyError.response?.error_code === 403) {
-        console.log('[START] Пользователь заблокировал бота, не можем отправить сообщение об ошибке');
         return;
       }
       console.error('[START] Ошибка при отправке сообщения об ошибке:', replyError);
@@ -210,12 +206,26 @@ BOT.start(async (ctx) => {
 });
 
 // чтобы узнать chat.id админа
-BOT.command('whoami', (ctx) => ctx.reply(`Ваш chat.id: ${ctx.chat.id}`));
+BOT.command('whoami', (ctx) => ctx.reply(`Ваш chat.id: ${ctx.chat.id}`, removeKeyboard));
 
 // маршрут завершён
 BOT.hears('✅ Маршрут завершён', async (ctx) => {
-  await db.setUserPaused(ctx.chat.id);
-  await ctx.reply('🛑 Маршрут завершён. Напоминания остановлены.');
+  try {
+    const driver = await db.getDriverByChatId(ctx.chat.id);
+    if (!driver) {
+      return ctx.reply('Вы не зарегистрированы как водитель.', removeKeyboard);
+    }
+    
+    await endRoute(ctx.chat.id, driver.id, 'Водитель нажал кнопку "Маршрут завершён"');
+    await ctx.reply('🛑 Маршрут завершён. Напоминания остановлены.', removeKeyboard);
+  } catch (error) {
+    console.error('[ROUTE_END] Ошибка при завершении маршрута:', error);
+    try {
+      await ctx.reply('Произошла ошибка при завершении маршрута. Попробуйте позже.', removeKeyboard);
+    } catch (replyError) {
+      console.error('[ROUTE_END] Ошибка при отправке сообщения:', replyError);
+    }
+  }
 });
 
 // пришла локация
@@ -225,16 +235,16 @@ BOT.on('location', async (ctx) => {
     console.log('[LOCATION] Получена локация от chat_id:', ctx.chat.id);
     console.log('[LOCATION] Координаты:', ctx.message.location?.latitude, ctx.message.location?.longitude);
     
-    const user = await db.getUser(ctx.chat.id);
-    console.log('[LOCATION] Пользователь из БД:', user ? `найден, active=${user.active}, driver_id=${user.driver_id}` : 'не найден');
+    const driver = await db.getDriverByChatId(ctx.chat.id);
+    console.log('[LOCATION] Водитель из БД:', driver ? `найден, is_active=${driver.is_active}, route_status=${driver.route_status}` : 'не найден');
     
-    if (!user || !user.active) {
-      console.log('[LOCATION] Пользователь не активен, chat_id:', ctx.chat.id);
+    if (!driver) {
+      console.log('[LOCATION] Водитель не найден, chat_id:', ctx.chat.id);
       try {
-        await ctx.reply('Ваш профиль не активен. Зайдите по своей персональной ссылке.');
+        await ctx.reply('Ваш профиль не активен. Зайдите по своей персональной ссылке.', removeKeyboard);
       } catch (replyError) {
         if (replyError.response?.error_code === 403) {
-          console.log('[LOCATION] Пользователь заблокировал бота, не отправляем сообщение');
+          console.log('[LOCATION] Пользователь заблокировал бота');
           return;
         }
         throw replyError;
@@ -242,23 +252,57 @@ BOT.on('location', async (ctx) => {
       return;
     }
 
+    // Проверяем статус маршрута
+    const routeStatus = driver.route_status || 'not-started-yet';
+    console.log('[LOCATION] Статус маршрута:', routeStatus);
+
+    // Если маршрут остановлен, не принимаем локации
+    if (routeStatus === 'stopped') {
+      console.log('[LOCATION] Маршрут остановлен, не принимаем локацию');
+      try {
+        await ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+      } catch (replyError) {
+        if (replyError.response?.error_code === 403) {
+          return;
+        }
+        throw replyError;
+      }
+      return;
+    }
+
+    // Проверяем, есть ли уже локации у водителя (первая локация или нет)
+    const hasExistingLocations = await db.hasLocations(driver.id);
+    console.log('[LOCATION] Есть ли уже локации у водителя:', hasExistingLocations);
+
+    // Если это первая локация водителя, активируем его
+    if (!hasExistingLocations) {
+      console.log('[LOCATION] Первая локация водителя, активируем и устанавливаем статус in-progress');
+      await db.activateDriver(driver.id, ctx.from.id);
+    } else if (routeStatus === 'not-started-yet') {
+      // Если водитель уже отправлял локации, но статус not-started-yet (возобновление маршрута)
+      console.log('[LOCATION] Возобновление маршрута, меняем статус на in-progress');
+      await db.setDriverRouteStatus(driver.id, 'in-progress');
+      await db.linkDriverToTelegram(driver.id, ctx.from.id);
+      await db.setDriverActive(driver.id, true);
+      driver.is_active = true;
+    }
+
     // Проверяем, не истекла ли дата окончания напоминаний
-    let driver = await db.getDriver(user.driver_id);
-    if (driver && driver.reminder_end_date) {
+    if (driver.reminder_end_date) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const endDate = new Date(driver.reminder_end_date);
       endDate.setHours(0, 0, 0, 0);
       
       if (today > endDate) {
-        console.log('[LOCATION] Дата окончания напоминаний истекла, деактивируем водителя');
-        await db.setUserPaused(ctx.chat.id);
-        await ctx.reply('🛑 Маршрут завершён. Период напоминаний истёк.');
+        console.log('[LOCATION] Дата окончания напоминаний истекла, завершаем маршрут');
+        await endRoute(ctx.chat.id, driver.id, 'Дата окончания напоминаний истекла');
+        await ctx.reply('🛑 Маршрут завершён. Период напоминаний истёк.', removeKeyboard);
         return;
       }
     }
 
-    const driverId = user.driver_id;
+    const driverId = driver.id;
     const { latitude: lat, longitude: lon } = ctx.message.location;
     const capturedAt = new Date().toISOString();
 
@@ -266,18 +310,12 @@ BOT.on('location', async (ctx) => {
 
     // Сохраняем локацию в БД
     try {
-      const savedLocation = await db.saveLocation(ctx.chat.id, driverId, lat, lon);
+      const savedLocation = await db.saveLocation(driverId, lat, lon);
       console.log('[LOCATION] Локация сохранена в БД, id:', savedLocation?.id);
     } catch (err) {
       console.error('[LOCATION] Ошибка сохранения локации:', err);
-      await ctx.reply('❌ Ошибка при сохранении локации. Попробуйте еще раз.');
+      await ctx.reply('❌ Ошибка при сохранении локации. Попробуйте еще раз.', keyboard);
       return;
-    }
-
-    // Получаем имя водителя для сообщения админу (если еще не получено)
-    if (!driver) {
-      const drivers = await db.getDrivers();
-      driver = drivers.find(d => d.id === driverId) || { id: driverId, name: 'Водитель' };
     }
 
     // отправляем координаты админу в телеграм
@@ -288,7 +326,6 @@ BOT.on('location', async (ctx) => {
         console.log('[LOCATION] Уведомление отправлено админу');
       } catch (adminError) {
         console.error('[LOCATION] Ошибка при отправке уведомления админу:', adminError);
-        // Не прерываем выполнение, если не удалось отправить админу
       }
     } else {
       console.log('[LOCATION] ADMIN_CHAT_ID не установлен, пропускаем уведомление админу');
@@ -296,11 +333,11 @@ BOT.on('location', async (ctx) => {
 
     // Отправляем подтверждение пользователю
     try {
-      await ctx.reply('✅ Геопозиция принята. Спасибо!');
+      await ctx.reply('✅ Геопозиция принята. Спасибо!', keyboard);
       console.log('[LOCATION] Подтверждение отправлено пользователю');
     } catch (replyError) {
       if (replyError.response?.error_code === 403) {
-        console.log('[LOCATION] Пользователь заблокировал бота, не отправляем подтверждение');
+        console.log('[LOCATION] Пользователь заблокировал бота');
         return;
       }
       throw replyError;
@@ -311,25 +348,24 @@ BOT.on('location', async (ctx) => {
     console.error('[LOCATION] ===== ОШИБКА ПРИ ОБРАБОТКЕ ЛОКАЦИИ =====');
     console.error('[LOCATION] Сообщение:', error.message);
     console.error('[LOCATION] Stack:', error.stack);
-    console.error('[LOCATION] Полная ошибка:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     console.error('[LOCATION] chat_id:', ctx.chat.id);
     
     try {
-      // Проверяем, не заблокирован ли бот пользователем
       if (error.response?.error_code === 403) {
-        console.log('[LOCATION] Пользователь заблокировал бота, не отправляем сообщение об ошибке');
+        console.log('[LOCATION] Пользователь заблокировал бота');
         return;
       }
-      await ctx.reply('❌ Произошла ошибка при обработке локации. Попробуйте позже.');
+      await ctx.reply('❌ Произошла ошибка при обработке локации. Попробуйте позже.', removeKeyboard);
     } catch (replyError) {
       if (replyError.response?.error_code === 403) {
-        console.log('[LOCATION] Пользователь заблокировал бота, не можем отправить сообщение об ошибке');
         return;
       }
       console.error('[LOCATION] Ошибка при отправке сообщения об ошибке:', replyError);
     }
   }
 });
+
+// если текст вместо локации (но не команды)
 BOT.on('text', async (ctx) => {
   // Пропускаем команды (они обрабатываются отдельными обработчиками)
   if (ctx.message.text?.startsWith('/')) {
@@ -341,10 +377,11 @@ BOT.on('text', async (ctx) => {
     return;
   }
   
-  // Пропускаем если пользователь не активен (чтобы не спамить)
-  const user = await db.getUser(ctx.chat.id);
-  if (!user || !user.active) {
-    return; // Молча игнорируем, если пользователь не активирован
+  // Проверяем, активен ли водитель
+  const driver = await db.getDriverByChatId(ctx.chat.id);
+  if (!driver || !driver.is_active) {
+    console.log('[TEXT] Водитель не активен, игнорируем текстовое сообщение:', ctx.chat.id);
+    return; // Молча игнорируем
   }
   
   return ctx.reply('Это не геопозиция. Нажмите "📍 Отправить местоположение" и подтвердите отправку.', keyboard);
@@ -352,41 +389,62 @@ BOT.on('text', async (ctx) => {
 
 // крон: каждый день в 09:00 по TZ
 cron.schedule('40 18 * * *', async () => {
-  const activeUsers = await db.getActiveUsers();
+  const activeDrivers = await db.getActiveDrivers();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   
-  for (const user of activeUsers) {
-    if (await db.wasRemindedToday(user.chat_id)) continue;
+  for (const driver of activeDrivers) {
+    // Проверяем, был ли водитель напомнен сегодня
+    if (await db.wasRemindedToday(driver.telegram_chat_id)) continue;
     
-    // Получаем данные водителя для проверки дат напоминаний
-    const driver = await db.getDriver(user.driver_id);
-    if (driver) {
-      // Проверяем дату начала напоминаний
-      if (driver.reminder_start_date) {
-        const startDate = new Date(driver.reminder_start_date);
-        startDate.setHours(0, 0, 0, 0);
-        if (today < startDate) {
-          console.log(`[CRON] Пропускаем напоминание для водителя ${driver.id}, дата начала еще не наступила`);
-          continue;
-        }
-      }
-      
-      // Проверяем дату окончания напоминаний
-      if (driver.reminder_end_date) {
-        const endDate = new Date(driver.reminder_end_date);
-        endDate.setHours(0, 0, 0, 0);
-        if (today > endDate) {
-          console.log(`[CRON] Дата окончания напоминаний истекла для водителя ${driver.id}, деактивируем`);
-          await db.setUserPaused(user.chat_id);
-          await BOT.telegram.sendMessage(user.chat_id, '🛑 Маршрут завершён. Период напоминаний истёк.');
-          continue;
-        }
+    // Проверяем статус маршрута - напоминания только для in-progress или not-started-yet
+    const routeStatus = driver.route_status || 'not-started-yet';
+    if (routeStatus === 'stopped') {
+      console.log(`[CRON] Пропускаем напоминание для водителя ${driver.id}, маршрут остановлен`);
+      continue;
+    }
+    
+    // Проверяем дату начала напоминаний
+    if (driver.reminder_start_date) {
+      const startDate = new Date(driver.reminder_start_date);
+      startDate.setHours(0, 0, 0, 0);
+      if (today < startDate) {
+        console.log(`[CRON] Пропускаем напоминание для водителя ${driver.id}, дата начала еще не наступила`);
+        continue;
       }
     }
     
-    await BOT.telegram.sendMessage(user.chat_id, 'Доброе утро! Пожалуйста, отправьте вашу геопозицию кнопкой ниже.', keyboard);
-    await db.markRemindedToday(user.chat_id);
+    // Проверяем дату окончания напоминаний
+    if (driver.reminder_end_date) {
+      const endDate = new Date(driver.reminder_end_date);
+      endDate.setHours(0, 0, 0, 0);
+      if (today > endDate) {
+        console.log(`[CRON] Дата окончания напоминаний истекла для водителя ${driver.id}, завершаем маршрут`);
+        await endRoute(driver.telegram_chat_id, driver.id, 'Дата окончания напоминаний истекла (cron)');
+        try {
+          await BOT.telegram.sendMessage(driver.telegram_chat_id, '🛑 Маршрут завершён. Период напоминаний истёк.', removeKeyboard);
+        } catch (err) {
+          if (err.response?.error_code === 403) {
+            console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+          }
+        }
+        continue;
+      }
+    }
+    
+    // Отправляем напоминание и обновляем last_reminded_date
+    try {
+      await BOT.telegram.sendMessage(driver.telegram_chat_id, 'Доброе утро! Пожалуйста, отправьте вашу геопозицию кнопкой ниже.', keyboard);
+      await db.markRemindedToday(driver.telegram_chat_id);
+      console.log(`[CRON] Напоминание отправлено водителю ${driver.id}, last_reminded_date обновлена`);
+    } catch (cronReplyError) {
+      if (cronReplyError.response?.error_code === 403) {
+        console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота, деактивируем`);
+        await db.setDriverInactive(driver.telegram_chat_id);
+      } else {
+        console.error(`[CRON] Ошибка при отправке напоминания водителю ${driver.id}:`, cronReplyError);
+      }
+    }
   }
 }, { timezone: TZ });
 
@@ -406,4 +464,3 @@ BOT.launch().then(() => console.log('Bot started (long polling)…'))
 
 process.once('SIGINT', () => BOT.stop('SIGINT'));
 process.once('SIGTERM', () => BOT.stop('SIGTERM'));
-
