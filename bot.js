@@ -5,6 +5,7 @@ require('dotenv').config({ override: false });
 const { Telegraf, Markup } = require('telegraf');
 const cron = require('node-cron');
 const db = require('./lib/db');
+const supabase = require('./lib/supabase');
 
 // Логируем для диагностики
 console.log('[BOOT] BOT_TOKEN установлен:', !!process.env.BOT_TOKEN);
@@ -79,11 +80,12 @@ const removeKeyboard = Markup.removeKeyboard();
 
 /**
  * Унифицированная функция завершения маршрута
+ * Использует setDriverRouteStatus для автоматической синхронизации is_active с route_status
  */
 async function endRoute(chatId, driverId, reason = '') {
   try {
+    // setDriverRouteStatus автоматически установит is_active = false при route_status = 'stopped'
     await db.setDriverRouteStatus(driverId, 'stopped');
-    await db.setDriverInactive(chatId);
     console.log(`[endRoute] Маршрут завершен для driver_id: ${driverId}, chat_id: ${chatId}, причина: ${reason}`);
     return true;
   } catch (error) {
@@ -144,16 +146,31 @@ BOT.start(async (ctx) => {
     const routeStatus = driver.route_status || 'not-started-yet';
     console.log('[START] Статус маршрута:', routeStatus);
 
-    // Если маршрут остановлен, сообщаем об этом
+    // Если маршрут остановлен, проверяем, не создан ли новый маршрут
+    // Админ может создать новый маршрут, установив новые даты и route_status = 'not-started-yet'
+    // Но если статус еще 'stopped', а даты уже установлены - это новый маршрут
     if (routeStatus === 'stopped') {
-      console.log('[START] Маршрут завершен, сообщаем водителю');
-      return ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+      // Проверяем, есть ли новый маршрут (даты установлены и водитель был активирован)
+      if (driver.journey_start_date && driver.journey_end_date && driver.telegram_chat_id) {
+        // Новый маршрут создан админом - обновляем статус
+        console.log('[START] Обнаружен новый маршрут после остановки, обновляем статус на not-started-yet');
+        await db.setDriverRouteStatus(driver.id, 'not-started-yet');
+        driver.route_status = 'not-started-yet';
+        // Продолжаем обработку ниже для отправки уведомления о новом маршруте
+      } else {
+        // Маршрут действительно остановлен, нового маршрута нет
+        console.log('[START] Маршрут завершен, нового маршрута нет');
+        return ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+      }
     }
 
     // Обновляем только telegram_chat_id, НЕ меняем route_status и is_active при /start
     // Они изменятся при первой отправке локации
     await db.linkDriverToTelegram(driver.id, ctx.from.id);
     console.log('[START] Водитель связан с Telegram, chat_id:', ctx.from.id, 'driver_id:', driver.id);
+    
+    // Обновляем объект driver после обновления telegram_chat_id
+    driver.telegram_chat_id = ctx.from.id;
     
     // Отправляем приветственное сообщение
     try {
@@ -168,8 +185,21 @@ BOT.start(async (ctx) => {
       console.log('[START] Не удалось убрать стандартную клавиатуру (это нормально):', err.message);
     }
     
-    // Если статус not-started-yet, отправляем уведомление о новой поездке
-    if (routeStatus === 'not-started-yet') {
+    // Проверяем, создан ли новый маршрут для водителя
+    if (db.isNewRoute(driver)) {
+      console.log('[START] Обнаружен новый маршрут для водителя:', driver.id);
+      const startDate = db.formatDateForDriver(driver.journey_start_date);
+      const endDate = db.formatDateForDriver(driver.journey_end_date);
+      
+      await ctx.reply(
+        `🚗 У вас новый маршрут!\n\n` +
+        `📅 Дата начала: ${startDate}\n` +
+        `📅 Дата окончания: ${endDate}\n\n` +
+        `Нажмите "📍 Отправить местоположение" чтобы начать поездку.`,
+        keyboard
+      );
+    } else if (routeStatus === 'not-started-yet') {
+      // Первое создание водителя (telegram_chat_id был NULL)
       await ctx.reply(
         `🚗 У вас новая поездка!\n\nПривет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
         keyboard
@@ -177,10 +207,10 @@ BOT.start(async (ctx) => {
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
     } else {
       // Обычное приветствие для активного маршрута
-      await ctx.reply(
-        `Привет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
-        keyboard
-      );
+    await ctx.reply(
+      `Привет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
+      keyboard
+    );
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
     }
     
@@ -256,18 +286,51 @@ BOT.on('location', async (ctx) => {
     const routeStatus = driver.route_status || 'not-started-yet';
     console.log('[LOCATION] Статус маршрута:', routeStatus);
 
-    // Если маршрут остановлен, не принимаем локации
+    // Если маршрут остановлен, проверяем, не создан ли новый маршрут
     if (routeStatus === 'stopped') {
-      console.log('[LOCATION] Маршрут остановлен, не принимаем локацию');
+      // Проверяем, есть ли новый маршрут (даты установлены и водитель был активирован)
+      if (driver.journey_start_date && driver.journey_end_date && driver.telegram_chat_id) {
+        // Новый маршрут создан админом - обновляем статус
+        console.log('[LOCATION] Обнаружен новый маршрут после остановки, обновляем статус на not-started-yet');
+        await db.setDriverRouteStatus(driver.id, 'not-started-yet');
+        driver.route_status = 'not-started-yet';
+        // Продолжаем обработку ниже для отправки уведомления и обработки локации
+      } else {
+        // Маршрут действительно остановлен, нового маршрута нет
+        console.log('[LOCATION] Маршрут остановлен, не принимаем локацию');
+        try {
+          await ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+        } catch (replyError) {
+          if (replyError.response?.error_code === 403) {
+            return;
+          }
+          throw replyError;
+        }
+        return;
+      }
+    }
+
+    // Проверяем, создан ли новый маршрут для водителя
+    if (db.isNewRoute(driver)) {
+      console.log('[LOCATION] Обнаружен новый маршрут для водителя:', driver.id);
+      const startDate = db.formatDateForDriver(driver.journey_start_date);
+      const endDate = db.formatDateForDriver(driver.journey_end_date);
+      
       try {
-        await ctx.reply('🛑 Ваш маршрут завершён. Обратитесь к диспетчеру для получения нового маршрута.', removeKeyboard);
+        await ctx.reply(
+          `🚗 У вас новый маршрут!\n\n` +
+          `📅 Дата начала: ${startDate}\n` +
+          `📅 Дата окончания: ${endDate}\n\n` +
+          `Нажмите "📍 Отправить местоположение" чтобы начать поездку.`,
+          keyboard
+        );
       } catch (replyError) {
         if (replyError.response?.error_code === 403) {
           return;
         }
         throw replyError;
       }
-      return;
+      // Продолжаем обработку локации после уведомления
     }
 
     // Проверяем, есть ли уже локации у водителя (первая локация или нет)
@@ -275,29 +338,26 @@ BOT.on('location', async (ctx) => {
     console.log('[LOCATION] Есть ли уже локации у водителя:', hasExistingLocations);
 
     // Если это первая локация водителя, активируем его
-    if (!hasExistingLocations) {
+    // Статус должен меняться только автоматически, не при "возобновлении"
+    if (!hasExistingLocations && routeStatus === 'not-started-yet') {
       console.log('[LOCATION] Первая локация водителя, активируем и устанавливаем статус in-progress');
       await db.activateDriver(driver.id, ctx.from.id);
-    } else if (routeStatus === 'not-started-yet') {
-      // Если водитель уже отправлял локации, но статус not-started-yet (возобновление маршрута)
-      console.log('[LOCATION] Возобновление маршрута, меняем статус на in-progress');
-      await db.setDriverRouteStatus(driver.id, 'in-progress');
-      await db.linkDriverToTelegram(driver.id, ctx.from.id);
-      await db.setDriverActive(driver.id, true);
+      driver.route_status = 'in-progress';
       driver.is_active = true;
     }
 
-    // Проверяем, не истекла ли дата окончания напоминаний
-    if (driver.reminder_end_date) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const endDate = new Date(driver.reminder_end_date);
-      endDate.setHours(0, 0, 0, 0);
+    // Проверяем, не истекла ли дата окончания поездки
+    // Используем journey_end_date, если есть, иначе fallback на reminder_end_date
+    // Учитываем часовой пояс админа для корректного сравнения дат
+    const endDate = driver.journey_end_date || driver.reminder_end_date;
+    if (endDate) {
+      const todayInAdminTZ = await db.getTodayInAdminTimezone();
+      const journeyEndDateStr = new Date(endDate).toISOString().slice(0, 10);
       
-      if (today > endDate) {
-        console.log('[LOCATION] Дата окончания напоминаний истекла, завершаем маршрут');
-        await endRoute(ctx.chat.id, driver.id, 'Дата окончания напоминаний истекла');
-        await ctx.reply('🛑 Маршрут завершён. Период напоминаний истёк.', removeKeyboard);
+      if (todayInAdminTZ > journeyEndDateStr) {
+        console.log('[LOCATION] Дата окончания поездки истекла, завершаем маршрут');
+        await endRoute(ctx.chat.id, driver.id, 'Дата окончания поездки истекла');
+        await ctx.reply('🛑 Маршрут завершён. Период поездки истёк.', removeKeyboard);
         return;
       }
     }
@@ -321,9 +381,9 @@ BOT.on('location', async (ctx) => {
     // отправляем координаты админу в телеграм
     if (process.env.ADMIN_CHAT_ID) {
       try {
-        const text = `📍 Локация\nВодитель: ${driver.name} (${driver.id})\nКоординаты: ${lat.toFixed(6)}, ${lon.toFixed(6)}\nВремя: ${capturedAt}`;
-        await BOT.telegram.sendMessage(process.env.ADMIN_CHAT_ID, text);
-        console.log('[LOCATION] Уведомление отправлено админу');
+      const text = `📍 Локация\nВодитель: ${driver.name} (${driver.id})\nКоординаты: ${lat.toFixed(6)}, ${lon.toFixed(6)}\nВремя: ${capturedAt}`;
+      await BOT.telegram.sendMessage(process.env.ADMIN_CHAT_ID, text);
+      console.log('[LOCATION] Уведомление отправлено админу');
       } catch (adminError) {
         console.error('[LOCATION] Ошибка при отправке уведомления админу:', adminError);
       }
@@ -334,7 +394,7 @@ BOT.on('location', async (ctx) => {
     // Отправляем подтверждение пользователю
     try {
       await ctx.reply('✅ Геопозиция принята. Спасибо!', keyboard);
-      console.log('[LOCATION] Подтверждение отправлено пользователю');
+    console.log('[LOCATION] Подтверждение отправлено пользователю');
     } catch (replyError) {
       if (replyError.response?.error_code === 403) {
         console.log('[LOCATION] Пользователь заблокировал бота');
@@ -390,8 +450,8 @@ BOT.on('text', async (ctx) => {
 // крон: каждый день в 09:00 по TZ
 cron.schedule('40 18 * * *', async () => {
   const activeDrivers = await db.getActiveDrivers();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Получаем текущую дату в часовом поясе админа
+  const todayInAdminTZ = await db.getTodayInAdminTimezone();
   
   for (const driver of activeDrivers) {
     // Проверяем, был ли водитель напомнен сегодня
@@ -404,31 +464,34 @@ cron.schedule('40 18 * * *', async () => {
       continue;
     }
     
-    // Проверяем дату начала напоминаний
-    if (driver.reminder_start_date) {
-      const startDate = new Date(driver.reminder_start_date);
-      startDate.setHours(0, 0, 0, 0);
-      if (today < startDate) {
-        console.log(`[CRON] Пропускаем напоминание для водителя ${driver.id}, дата начала еще не наступила`);
-        continue;
+    // Проверяем дату начала поездки
+    // Используем journey_start_date, если есть, иначе fallback на reminder_start_date
+    const startDate = driver.journey_start_date || driver.reminder_start_date;
+    if (startDate) {
+      const journeyStartDateStr = new Date(startDate).toISOString().slice(0, 10);
+      if (todayInAdminTZ < journeyStartDateStr) {
+        console.log(`[CRON] Пропускаем напоминание для водителя ${driver.id}, дата начала поездки еще не наступила`);
+          continue;
+        }
       }
-    }
-    
-    // Проверяем дату окончания напоминаний
-    if (driver.reminder_end_date) {
-      const endDate = new Date(driver.reminder_end_date);
-      endDate.setHours(0, 0, 0, 0);
-      if (today > endDate) {
-        console.log(`[CRON] Дата окончания напоминаний истекла для водителя ${driver.id}, завершаем маршрут`);
-        await endRoute(driver.telegram_chat_id, driver.id, 'Дата окончания напоминаний истекла (cron)');
+      
+    // Проверяем дату окончания поездки
+    // Используем journey_end_date, если есть, иначе fallback на reminder_end_date
+    // Учитываем часовой пояс админа
+    const endDate = driver.journey_end_date || driver.reminder_end_date;
+    if (endDate) {
+      const journeyEndDateStr = new Date(endDate).toISOString().slice(0, 10);
+      if (todayInAdminTZ > journeyEndDateStr) {
+        console.log(`[CRON] Дата окончания поездки истекла для водителя ${driver.id}, завершаем маршрут`);
+        await endRoute(driver.telegram_chat_id, driver.id, 'Дата окончания поездки истекла (cron)');
         try {
-          await BOT.telegram.sendMessage(driver.telegram_chat_id, '🛑 Маршрут завершён. Период напоминаний истёк.', removeKeyboard);
+          await BOT.telegram.sendMessage(driver.telegram_chat_id, '🛑 Маршрут завершён. Период поездки истёк.', removeKeyboard);
         } catch (err) {
           if (err.response?.error_code === 403) {
             console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
           }
         }
-        continue;
+          continue;
       }
     }
     
@@ -445,6 +508,114 @@ cron.schedule('40 18 * * *', async () => {
         console.error(`[CRON] Ошибка при отправке напоминания водителю ${driver.id}:`, cronReplyError);
       }
     }
+  }
+}, { timezone: TZ });
+
+// крон: проверка поездок, которые заканчиваются скоро (ежедневно в 08:00)
+cron.schedule('0 8 * * *', async () => {
+  console.log('[CRON] Запуск проверки поездок, которые заканчиваются скоро.');
+  
+  try {
+    // Получаем часовой пояс админа и вычисляем завтрашнюю дату в этом часовом поясе
+    const adminTimezone = await db.getAdminTimezone();
+    const todayInAdminTZ = await db.getTodayInAdminTimezone();
+    
+    // Вычисляем завтрашнюю дату в часовом поясе админа
+    const today = new Date(todayInAdminTZ + 'T00:00:00');
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+    
+    // Получаем водителей, у которых поездка заканчивается завтра (в часовом поясе админа)
+    const { data: driversEndingSoon, error } = await supabase
+      .from('drivers')
+      .select('*')
+      .eq('journey_end_date', tomorrowStr)
+      .neq('route_status', 'stopped');
+    
+    if (error) {
+      console.error('[CRON] Ошибка при получении водителей с ending soon:', error);
+      return;
+    }
+    
+    for (const driver of (driversEndingSoon || [])) {
+      // Проверяем, было ли уже отправлено уведомление
+      const alreadyNotified = await db.checkJourneyNotificationSent(driver.id, 'ending_soon');
+      
+      if (!alreadyNotified) {
+        // Создаем запись в journey_notifications для админки
+        await db.markJourneyNotificationSent(driver.id, 'ending_soon');
+        console.log(`[CRON] Создана запись уведомления 'ending_soon' для водителя ${driver.id} (${driver.name})`);
+      }
+    }
+    
+    console.log(`[CRON] Проверка поездок, которые заканчиваются скоро, завершена. Найдено: ${driversEndingSoon?.length || 0}`);
+  } catch (error) {
+    console.error('[CRON] Ошибка при проверке поездок, которые заканчиваются скоро:', error);
+  }
+}, { timezone: TZ });
+
+// крон: автоматическая остановка маршрутов с истекшей датой (ежедневно в 00:00)
+cron.schedule('0 0 * * *', async () => {
+  console.log('[CRON] Запуск автоматической остановки маршрутов с истекшей датой.');
+  
+  try {
+    // Получаем текущую дату в часовом поясе админа
+    const todayInAdminTZ = await db.getTodayInAdminTimezone();
+    
+    // Находим водителей с истекшей датой поездки (в часовом поясе админа)
+    const { data: expiredDrivers, error } = await supabase
+      .from('drivers')
+      .select('*')
+      .not('journey_end_date', 'is', null)
+      .lt('journey_end_date', todayInAdminTZ)
+      .neq('route_status', 'stopped');
+    
+    if (error) {
+      console.error('[CRON] Ошибка при получении водителей с истекшей датой:', error);
+      return;
+    }
+    
+    const stopped = [];
+    
+    for (const driver of (expiredDrivers || [])) {
+      try {
+        // Останавливаем маршрут (setDriverRouteStatus автоматически установит is_active = false)
+        await db.setDriverRouteStatus(driver.id, 'stopped');
+        
+        // Отмечаем уведомление как отправленное (если еще не отправлено)
+        const alreadyNotified = await db.checkJourneyNotificationSent(driver.id, 'ended');
+        if (!alreadyNotified) {
+          await db.markJourneyNotificationSent(driver.id, 'ended');
+        }
+        
+        stopped.push(driver);
+        console.log(`[CRON] Маршрут остановлен для водителя ${driver.id} (${driver.name})`);
+        
+        // Отправляем уведомление водителю (если он не заблокировал бота)
+        if (driver.telegram_chat_id) {
+          try {
+            await BOT.telegram.sendMessage(
+              driver.telegram_chat_id,
+              '🛑 Ваш маршрут автоматически завершён. Период поездки истёк.',
+              removeKeyboard
+            );
+          } catch (err) {
+            if (err.response?.error_code === 403) {
+              console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+            } else {
+              console.error(`[CRON] Ошибка при отправке уведомления водителю ${driver.id}:`, err);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`[CRON] Ошибка при остановке маршрута для водителя ${driver.id}:`, error);
+      }
+    }
+    
+    console.log(`[CRON] Автоматическая остановка маршрутов завершена. Остановлено: ${stopped.length}`);
+  } catch (error) {
+    console.error('[CRON] Ошибка при автоматической остановке маршрутов:', error);
   }
 }, { timezone: TZ });
 
