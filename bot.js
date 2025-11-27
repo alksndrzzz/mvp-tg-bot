@@ -202,7 +202,29 @@ BOT.start(async (ctx) => {
       console.log('[START] Не удалось убрать стандартную клавиатуру (это нормально):', err.message);
     }
     
+    // Получаем актуальные данные водителя из БД после обновления telegram_chat_id
+    // Это важно для корректной проверки нового маршрута
+    const updatedDriver = await db.getDriverByChatId(ctx.from.id);
+    if (updatedDriver) {
+      // Обновляем объект driver актуальными данными
+      Object.assign(driver, updatedDriver);
+      console.log('[START] Данные водителя обновлены из БД:', {
+        route_status: driver.route_status,
+        journey_start_date: driver.journey_start_date,
+        journey_end_date: driver.journey_end_date
+      });
+    }
+    
     // Проверяем, создан ли новый маршрут для водителя
+    console.log('[START] Проверка нового маршрута:', {
+      driver_id: driver.id,
+      route_status: driver.route_status,
+      journey_start_date: driver.journey_start_date,
+      journey_end_date: driver.journey_end_date,
+      telegram_chat_id: driver.telegram_chat_id,
+      isNewRoute: db.isNewRoute(driver)
+    });
+    
     if (db.isNewRoute(driver)) {
       console.log('[START] Обнаружен новый маршрут для водителя:', driver.id);
       const startDate = db.formatDateForDriver(driver.journey_start_date);
@@ -328,6 +350,15 @@ BOT.on('location', async (ctx) => {
     }
 
     // Проверяем, создан ли новый маршрут для водителя
+    console.log('[LOCATION] Проверка нового маршрута:', {
+      driver_id: driver.id,
+      route_status: driver.route_status,
+      journey_start_date: driver.journey_start_date,
+      journey_end_date: driver.journey_end_date,
+      telegram_chat_id: driver.telegram_chat_id,
+      isNewRoute: db.isNewRoute(driver)
+    });
+    
     if (db.isNewRoute(driver)) {
       console.log('[LOCATION] Обнаружен новый маршрут для водителя:', driver.id);
       const startDate = db.formatDateForDriver(driver.journey_start_date);
@@ -338,7 +369,7 @@ BOT.on('location', async (ctx) => {
           `🚗 У вас новый маршрут!\n\n` +
           `📅 Дата начала: ${startDate}\n` +
           `📅 Дата окончания: ${endDate}\n\n` +
-          `Нажмите "📍 Отправить местоположение" чтобы начать поездку.`,
+          `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
           keyboard
         );
       } catch (replyError) {
@@ -641,11 +672,117 @@ function setupCronJobs() {
   console.log('[BOOT] Все cron задачи настроены с часовым поясом:', TZ);
 }
 
+// Функция для отправки уведомления о новом маршруте водителю
+async function sendNewRouteNotification(driver) {
+  if (!driver.telegram_chat_id) {
+    console.log('[NEW_ROUTE] Водитель не связан с Telegram, пропускаем уведомление:', driver.id);
+    return;
+  }
+
+  try {
+    const startDate = db.formatDateForDriver(driver.journey_start_date);
+    const endDate = db.formatDateForDriver(driver.journey_end_date);
+    
+    console.log('[NEW_ROUTE] Отправка уведомления о новом маршруте водителю:', driver.id, driver.name);
+    
+    await BOT.telegram.sendMessage(
+      driver.telegram_chat_id,
+      `🚗 У вас новый маршрут!\n\n` +
+      `📅 Дата начала: ${startDate}\n` +
+      `📅 Дата окончания: ${endDate}\n\n` +
+      `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
+      keyboard
+    );
+    
+    console.log('[NEW_ROUTE] Уведомление о новом маршруте отправлено водителю:', driver.id);
+  } catch (error) {
+    if (error.response?.error_code === 403) {
+      console.log('[NEW_ROUTE] Пользователь заблокировал бота:', driver.telegram_chat_id);
+    } else {
+      console.error('[NEW_ROUTE] Ошибка при отправке уведомления о новом маршруте:', error);
+    }
+  }
+}
+
+// Подписка на изменения в таблице drivers через Supabase Realtime
+function setupRealtimeSubscription() {
+  console.log('[REALTIME] Настройка подписки на изменения водителей...');
+  
+  const channel = supabase
+    .channel('drivers-updates')
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'drivers'
+      },
+      async (payload) => {
+        try {
+          const driver = payload.new;
+          const oldDriver = payload.old;
+          
+          console.log('[REALTIME] Получено обновление водителя:', {
+            driver_id: driver.id,
+            old_route_status: oldDriver?.route_status,
+            new_route_status: driver.route_status,
+            old_journey_start_date: oldDriver?.journey_start_date,
+            new_journey_start_date: driver.journey_start_date,
+            old_journey_end_date: oldDriver?.journey_end_date,
+            new_journey_end_date: driver.journey_end_date
+          });
+          
+          // Проверяем, что это новый маршрут
+          // Новый маршрут определяется как:
+          // - route_status = 'not-started-yet'
+          // - journey_start_date и journey_end_date установлены
+          // - telegram_chat_id установлен (водитель был активирован)
+          // - И либо route_status изменился на 'not-started-yet', либо даты изменились
+          const isRouteStatusChanged = oldDriver?.route_status !== driver.route_status;
+          const isDatesChanged = 
+            oldDriver?.journey_start_date !== driver.journey_start_date ||
+            oldDriver?.journey_end_date !== driver.journey_end_date;
+          
+          // Проверяем, что это новый маршрут (не первое создание)
+          if (db.isNewRoute(driver) && (isRouteStatusChanged || isDatesChanged)) {
+            console.log('[REALTIME] ✅ Обнаружен новый маршрут для водителя:', driver.id, driver.name);
+            await sendNewRouteNotification(driver);
+          } else {
+            console.log('[REALTIME] Обновление не является новым маршрутом:', {
+              driver_id: driver.id,
+              route_status: driver.route_status,
+              has_dates: !!(driver.journey_start_date && driver.journey_end_date),
+              has_chat_id: !!driver.telegram_chat_id,
+              isNewRoute: db.isNewRoute(driver),
+              isRouteStatusChanged,
+              isDatesChanged
+            });
+          }
+        } catch (error) {
+          console.error('[REALTIME] Ошибка при обработке обновления водителя:', error);
+        }
+      }
+    )
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        console.log('[REALTIME] ✅ Подписка на изменения водителей активна');
+      } else if (status === 'CHANNEL_ERROR') {
+        console.error('[REALTIME] ❌ Ошибка подписки на изменения водителей');
+      } else {
+        console.log('[REALTIME] Статус подписки:', status);
+      }
+    });
+  
+  return channel;
+}
+
 // Обработка ошибки конфликта при запуске нескольких экземпляров
 BOT.launch().then(async () => {
   console.log('Bot started (long polling)…');
   // Инициализируем cron задачи после запуска бота
   await initializeCronJobs();
+  // Настраиваем Realtime подписку для уведомлений о новых маршрутах
+  setupRealtimeSubscription();
 })
   .catch((error) => {
     if (error.response?.error_code === 409) {

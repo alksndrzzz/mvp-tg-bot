@@ -105,16 +105,29 @@ require('dotenv').config({ override: false });
 - `idx_journey_notifications_driver_type` - составной индекс на `(driver_id, notification_type)`
 - `idx_journey_notifications_type` - индекс на `notification_type`
 
+### Таблица `admin_settings`
+
+Настройки администратора.
+
+**Колонки:**
+- `id` (UUID, PK) - уникальный идентификатор
+- `timezone` (TEXT, NOT NULL, default: 'Europe/Vilnius') - часовой пояс в формате IANA
+- `created_at` (TIMESTAMPTZ, default: now()) - дата создания
+- `updated_at` (TIMESTAMPTZ, default: now()) - дата обновления
+
+**Использование в боте:**
+- `timezone` - используется для получения часового пояса админа (`getAdminTimezone()`)
+- Используется для определения времени отправки уведомлений и проверки дат
+
 ### Таблица `users`
 
-Пользователи системы (для получения часового пояса админа).
+Пользователи системы (не используется напрямую в боте для получения часового пояса).
 
 **Колонки:**
 - `id` (UUID, PK, FK → auth.users.id) - уникальный идентификатор
 - `email` (TEXT, NOT NULL) - email адрес
 - `role` (TEXT, NOT NULL, default: 'user') - роль пользователя
   - Возможные значения: `'admin'`, `'user'`
-- `timezone` (TEXT, nullable, default: 'Europe/Vilnius') - часовой пояс в формате IANA
 - Другие колонки (не используются в боте)
 
 ## Команды и обработчики
