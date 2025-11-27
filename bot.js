@@ -1001,37 +1001,43 @@ function setupWebhookServer() {
         return res.status(404).json({ error: 'Driver not found' });
       }
       
-      // Проверяем, что это действительно новый маршрут
-      // Важно: даже если маршрут был завершен ранее, если админ создал новый маршрут,
-      // то route_status должен быть 'not-started-yet', и isNewRoute вернет true
-      let isNewRouteResult = false;
-      try {
-        if (typeof db.isNewRoute === 'function') {
-          isNewRouteResult = db.isNewRoute(driver);
-          if (typeof isNewRouteResult !== 'boolean') {
-            console.error('[WEBHOOK] ERROR: isNewRoute вернула не boolean:', typeof isNewRouteResult, isNewRouteResult);
-            isNewRouteResult = false;
-          }
-        } else {
-          console.error('[WEBHOOK] ERROR: db.isNewRoute не является функцией:', typeof db.isNewRoute);
-          isNewRouteResult = false;
-        }
-      } catch (error) {
-        console.error('[WEBHOOK] ERROR при вызове db.isNewRoute:', error);
-        isNewRouteResult = false;
-      }
+      // Логируем текущее состояние водителя
+      console.log('[WEBHOOK] Состояние водителя в БД:', {
+        driverId: driver.id,
+        route_status: driver.route_status,
+        reminder_start_date: driver.reminder_start_date,
+        reminder_end_date: driver.reminder_end_date,
+        last_reminded_date: driver.last_reminded_date,
+        telegram_chat_id: driver.telegram_chat_id
+      });
       
-      if (!isNewRouteResult) {
-        console.log('[WEBHOOK] Это не новый маршрут для водителя:', driverId, {
-          route_status: driver.route_status,
-          reminder_start_date: driver.reminder_start_date,
-          reminder_end_date: driver.reminder_end_date,
-          last_reminded_date: driver.last_reminded_date
-        });
+      // Если webhook пришел от админки, это означает, что админ создал новый маршрут
+      // Отправляем уведомление водителю, даже если isNewRoute вернет false
+      // (это может произойти, если данные еще не обновились в БД)
+      // Но проверяем, что водитель активирован (имеет telegram_chat_id)
+      if (!driver.telegram_chat_id) {
+        console.log('[WEBHOOK] Водитель не активирован (нет telegram_chat_id), пропускаем уведомление');
         return res.status(200).json({ 
           success: true, 
-          message: 'Not a new route, notification skipped' 
+          message: 'Driver not activated, notification skipped' 
         });
+      }
+      
+      // Проверяем, что даты установлены
+      if (!reminderStartDate || !reminderEndDate) {
+        console.log('[WEBHOOK] Даты не установлены, пропускаем уведомление');
+        return res.status(400).json({ error: 'Dates not provided' });
+      }
+      
+      // Обновляем статус маршрута на 'not-started-yet', если он еще не установлен
+      // Это гарантирует, что маршрут будет в правильном состоянии
+      if (driver.route_status !== 'not-started-yet') {
+        console.log('[WEBHOOK] Обновляем статус маршрута на not-started-yet для водителя:', driverId);
+        try {
+          await db.setDriverRouteStatus(driverId, 'not-started-yet');
+        } catch (error) {
+          console.error('[WEBHOOK] Ошибка при обновлении статуса маршрута:', error);
+        }
       }
       
       // Отправляем уведомление водителю
