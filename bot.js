@@ -169,7 +169,12 @@ BOT.start(async (ctx) => {
     // Но если статус еще 'stopped', а даты уже установлены - это новый маршрут
     if (routeStatus === 'stopped') {
       // Проверяем, есть ли новый маршрут (даты установлены и водитель был активирован)
-      if (driver.journey_start_date && driver.journey_end_date && driver.telegram_chat_id) {
+      // Используем journey_*_date если есть, иначе fallback на reminder_*_date
+      const hasJourneyDates = driver.journey_start_date && driver.journey_end_date;
+      const hasReminderDates = driver.reminder_start_date && driver.reminder_end_date;
+      const hasDates = hasJourneyDates || hasReminderDates;
+      
+      if (hasDates && driver.telegram_chat_id) {
         // Новый маршрут создан админом - обновляем статус
         console.log('[START] Обнаружен новый маршрут после остановки, обновляем статус на not-started-yet');
         await db.setDriverRouteStatus(driver.id, 'not-started-yet');
@@ -359,7 +364,56 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
     }
     
     await endRoute(ctx.chat.id, driver.id, 'Водитель нажал кнопку "Маршрут завершён"');
-    await ctx.reply('Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
+    
+    // Обновляем данные водителя из БД после завершения маршрута
+    const updatedDriver = await db.getDriverByChatId(ctx.chat.id);
+    if (!updatedDriver) {
+      return ctx.reply('Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
+    }
+    
+    // Проверяем, есть ли новый маршрут
+    let isNewRouteResult = false;
+    try {
+      if (typeof db.isNewRoute === 'function') {
+        isNewRouteResult = db.isNewRoute(updatedDriver);
+        if (typeof isNewRouteResult !== 'boolean') {
+          console.error('[ROUTE_END] ERROR: isNewRoute вернула не boolean:', typeof isNewRouteResult, isNewRouteResult);
+          isNewRouteResult = false;
+        }
+      } else {
+        console.error('[ROUTE_END] ERROR: db.isNewRoute не является функцией:', typeof db.isNewRoute);
+        isNewRouteResult = false;
+      }
+    } catch (error) {
+      console.error('[ROUTE_END] ERROR при вызове db.isNewRoute:', error);
+      isNewRouteResult = false;
+    }
+    
+    if (isNewRouteResult) {
+      // Есть новый маршрут - показываем кнопки и отправляем уведомление
+      console.log('[ROUTE_END] Обнаружен новый маршрут после завершения, отправляем уведомление');
+      const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
+      const endDate = db.formatDateForDriver(updatedDriver.journey_end_date || updatedDriver.reminder_end_date);
+      
+      await ctx.reply(
+        `🚗 У вас новый маршрут!\n\n` +
+        `📅 Дата начала: ${startDate}\n` +
+        `📅 Дата окончания: ${endDate}\n\n` +
+        `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже:`,
+        keyboard
+      );
+      
+      // Обновляем last_reminded_date, чтобы не отправлять уведомление повторно
+      try {
+        await db.markRemindedToday(ctx.chat.id);
+        console.log('[ROUTE_END] last_reminded_date обновлена для водителя:', updatedDriver.id);
+      } catch (error) {
+        console.error('[ROUTE_END] Ошибка при обновлении last_reminded_date:', error);
+      }
+    } else {
+      // Нового маршрута нет - убираем кнопки
+      await ctx.reply('Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
+    }
   } catch (error) {
     console.error('[ROUTE_END] Ошибка при завершении маршрута:', error);
     try {
@@ -450,6 +504,49 @@ BOT.on('location', async (ctx) => {
       if (todayInAdminTZ > journeyEndDateStr) {
         console.log('[LOCATION] Дата окончания поездки истекла, завершаем маршрут');
         await endRoute(ctx.chat.id, driver.id, 'Дата окончания поездки истекла');
+        
+        // Обновляем данные водителя из БД после завершения маршрута
+        const updatedDriver = await db.getDriverByChatId(ctx.chat.id);
+        if (updatedDriver) {
+          // Проверяем, есть ли новый маршрут
+          let isNewRouteResult = false;
+          try {
+            if (typeof db.isNewRoute === 'function') {
+              isNewRouteResult = db.isNewRoute(updatedDriver);
+              if (typeof isNewRouteResult !== 'boolean') {
+                isNewRouteResult = false;
+              }
+            }
+          } catch (error) {
+            console.error('[LOCATION] ERROR при вызове db.isNewRoute:', error);
+            isNewRouteResult = false;
+          }
+          
+          if (isNewRouteResult) {
+            // Есть новый маршрут - показываем кнопки и отправляем уведомление
+            console.log('[LOCATION] Обнаружен новый маршрут после истечения даты, отправляем уведомление');
+            const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
+            const endDate = db.formatDateForDriver(updatedDriver.journey_end_date || updatedDriver.reminder_end_date);
+            
+            await ctx.reply(
+              `🚗 У вас новый маршрут!\n\n` +
+              `📅 Дата начала: ${startDate}\n` +
+              `📅 Дата окончания: ${endDate}\n\n` +
+              `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже:`,
+              keyboard
+            );
+            
+            // Обновляем last_reminded_date
+            try {
+              await db.markRemindedToday(ctx.chat.id);
+            } catch (error) {
+              console.error('[LOCATION] Ошибка при обновлении last_reminded_date:', error);
+            }
+            return;
+          }
+        }
+        
+        // Нового маршрута нет - убираем кнопки
         await ctx.reply('Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
         return;
       }
@@ -579,6 +676,54 @@ function setupCronJobs() {
       if (todayInAdminTZ > journeyEndDateStr) {
         console.log(`[CRON] Дата окончания поездки истекла для водителя ${driver.id}, завершаем маршрут`);
         await endRoute(driver.telegram_chat_id, driver.id, 'Дата окончания поездки истекла (cron)');
+        
+        // Обновляем данные водителя из БД после завершения маршрута
+        const updatedDriver = await db.getDriver(driver.id);
+        if (updatedDriver) {
+          // Проверяем, есть ли новый маршрут
+          let isNewRouteResult = false;
+          try {
+            if (typeof db.isNewRoute === 'function') {
+              isNewRouteResult = db.isNewRoute(updatedDriver);
+              if (typeof isNewRouteResult !== 'boolean') {
+                isNewRouteResult = false;
+              }
+            }
+          } catch (error) {
+            console.error('[CRON] ERROR при вызове db.isNewRoute:', error);
+            isNewRouteResult = false;
+          }
+          
+          if (isNewRouteResult) {
+            // Есть новый маршрут - показываем кнопки и отправляем уведомление
+            console.log('[CRON] Обнаружен новый маршрут после истечения даты, отправляем уведомление');
+            const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
+            const endDate = db.formatDateForDriver(updatedDriver.journey_end_date || updatedDriver.reminder_end_date);
+            
+            try {
+              await BOT.telegram.sendMessage(
+                driver.telegram_chat_id,
+                `🚗 У вас новый маршрут!\n\n` +
+                `📅 Дата начала: ${startDate}\n` +
+                `📅 Дата окончания: ${endDate}\n\n` +
+                `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
+                keyboard
+              );
+              
+              // Обновляем last_reminded_date
+              await db.markRemindedToday(driver.telegram_chat_id);
+            } catch (err) {
+              if (err.response?.error_code === 403) {
+                console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+              } else {
+                console.error('[CRON] Ошибка при отправке уведомления о новом маршруте:', err);
+              }
+            }
+            continue;
+          }
+        }
+        
+        // Нового маршрута нет - убираем кнопки
         try {
           await BOT.telegram.sendMessage(driver.telegram_chat_id, 'Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
         } catch (err) {
@@ -586,7 +731,7 @@ function setupCronJobs() {
             console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
           }
         }
-          continue;
+        continue;
       }
     }
     
@@ -689,17 +834,78 @@ cron.schedule('0 0 * * *', async () => {
         
         // Отправляем уведомление водителю (если он не заблокировал бота)
         if (driver.telegram_chat_id) {
-          try {
-            await BOT.telegram.sendMessage(
-              driver.telegram_chat_id,
-              'Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.',
-              removeKeyboard
-            );
-          } catch (err) {
-            if (err.response?.error_code === 403) {
-              console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+          // Обновляем данные водителя из БД после остановки маршрута
+          const updatedDriver = await db.getDriver(driver.id);
+          if (updatedDriver) {
+            // Проверяем, есть ли новый маршрут
+            let isNewRouteResult = false;
+            try {
+              if (typeof db.isNewRoute === 'function') {
+                isNewRouteResult = db.isNewRoute(updatedDriver);
+                if (typeof isNewRouteResult !== 'boolean') {
+                  isNewRouteResult = false;
+                }
+              }
+            } catch (error) {
+              console.error('[CRON] ERROR при вызове db.isNewRoute:', error);
+              isNewRouteResult = false;
+            }
+            
+            if (isNewRouteResult) {
+              // Есть новый маршрут - показываем кнопки и отправляем уведомление
+              console.log('[CRON] Обнаружен новый маршрут после автоматической остановки, отправляем уведомление');
+              const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
+              const endDate = db.formatDateForDriver(updatedDriver.journey_end_date || updatedDriver.reminder_end_date);
+              
+              try {
+                await BOT.telegram.sendMessage(
+                  driver.telegram_chat_id,
+                  `🚗 У вас новый маршрут!\n\n` +
+                  `📅 Дата начала: ${startDate}\n` +
+                  `📅 Дата окончания: ${endDate}\n\n` +
+                  `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
+                  keyboard
+                );
+                
+                // Обновляем last_reminded_date
+                await db.markRemindedToday(driver.telegram_chat_id);
+              } catch (err) {
+                if (err.response?.error_code === 403) {
+                  console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+                } else {
+                  console.error('[CRON] Ошибка при отправке уведомления о новом маршруте:', err);
+                }
+              }
             } else {
-              console.error(`[CRON] Ошибка при отправке уведомления водителю ${driver.id}:`, err);
+              // Нового маршрута нет - убираем кнопки
+              try {
+                await BOT.telegram.sendMessage(
+                  driver.telegram_chat_id,
+                  'Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.',
+                  removeKeyboard
+                );
+              } catch (err) {
+                if (err.response?.error_code === 403) {
+                  console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+                } else {
+                  console.error(`[CRON] Ошибка при отправке уведомления водителю ${driver.id}:`, err);
+                }
+              }
+            }
+          } else {
+            // Если не удалось получить обновленные данные, отправляем стандартное сообщение
+            try {
+              await BOT.telegram.sendMessage(
+                driver.telegram_chat_id,
+                'Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.',
+                removeKeyboard
+              );
+            } catch (err) {
+              if (err.response?.error_code === 403) {
+                console.log(`[CRON] Пользователь ${driver.telegram_chat_id} заблокировал бота`);
+              } else {
+                console.error(`[CRON] Ошибка при отправке уведомления водителю ${driver.id}:`, err);
+              }
             }
           }
         }
@@ -791,8 +997,32 @@ function setupWebhookServer() {
       }
       
       // Проверяем, что это действительно новый маршрут
-      if (!db.isNewRoute(driver)) {
-        console.log('[WEBHOOK] Это не новый маршрут для водителя:', driverId);
+      // Важно: даже если маршрут был завершен ранее, если админ создал новый маршрут,
+      // то route_status должен быть 'not-started-yet', и isNewRoute вернет true
+      let isNewRouteResult = false;
+      try {
+        if (typeof db.isNewRoute === 'function') {
+          isNewRouteResult = db.isNewRoute(driver);
+          if (typeof isNewRouteResult !== 'boolean') {
+            console.error('[WEBHOOK] ERROR: isNewRoute вернула не boolean:', typeof isNewRouteResult, isNewRouteResult);
+            isNewRouteResult = false;
+          }
+        } else {
+          console.error('[WEBHOOK] ERROR: db.isNewRoute не является функцией:', typeof db.isNewRoute);
+          isNewRouteResult = false;
+        }
+      } catch (error) {
+        console.error('[WEBHOOK] ERROR при вызове db.isNewRoute:', error);
+        isNewRouteResult = false;
+      }
+      
+      if (!isNewRouteResult) {
+        console.log('[WEBHOOK] Это не новый маршрут для водителя:', driverId, {
+          route_status: driver.route_status,
+          reminder_start_date: driver.reminder_start_date,
+          reminder_end_date: driver.reminder_end_date,
+          last_reminded_date: driver.last_reminded_date
+        });
         return res.status(200).json({ 
           success: true, 
           message: 'Not a new route, notification skipped' 
