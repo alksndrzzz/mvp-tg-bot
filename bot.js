@@ -363,9 +363,10 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
       return ctx.reply('Вы не зарегистрированы как водитель.', removeKeyboard);
     }
     
-    // Сохраняем даты текущего маршрута ДО завершения для сравнения
+    // Сохраняем данные текущего маршрута ДО завершения для сравнения
     const currentStartDate = driver.reminder_start_date || driver.journey_start_date;
     const currentEndDate = driver.reminder_end_date || driver.journey_end_date;
+    const currentRouteStatus = driver.route_status; // Сохраняем статус до завершения
     
     await endRoute(ctx.chat.id, driver.id, 'Водитель нажал кнопку "Маршрут завершён"');
     
@@ -381,7 +382,8 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
     // Новый маршрут определяется по:
     // 1. Есть даты (reminder_*_date или journey_*_date)
     // 2. last_reminded_date === null (сброшен при создании нового маршрута админом) - ГЛАВНЫЙ ИНДИКАТОР
-    // 3. ИЛИ даты изменились (даже если они раньше или в тот же день - водитель мог завершить раньше)
+    // 3. ИЛИ статус был 'not-started-yet' до завершения (админ создал новый маршрут, но водитель его еще не начал)
+    // 4. ИЛИ даты изменились (даже если они раньше или в тот же день - водитель мог завершить раньше)
     let isNewRouteResult = false;
     try {
       // Проверяем наличие дат нового маршрута (даже если статус 'stopped')
@@ -393,6 +395,11 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
       // last_reminded_date должен быть null - это главный индикатор нового маршрута
       // Если админ создал новый маршрут, он сбрасывает last_reminded_date в null
       const lastRemindedIsNull = updatedDriver.last_reminded_date === null || updatedDriver.last_reminded_date === undefined;
+      
+      // Если статус был 'not-started-yet' до завершения, это означает, что админ создал новый маршрут,
+      // но водитель его еще не начал (не отправил первую локацию)
+      // В этом случае это новый маршрут, даже если last_reminded_date не null (был обновлен при /start)
+      const wasNotStartedYet = currentRouteStatus === 'not-started-yet';
       
       // Проверяем, изменились ли даты по сравнению с предыдущим маршрутом
       // Новый маршрут может начинаться в тот же день или даже раньше, если водитель завершил предыдущий раньше
@@ -411,16 +418,20 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
       // Новый маршрут определяется по:
       // - last_reminded_date === null (админ создал новый маршрут и сбросил его)
       // ИЛИ
+      // - статус был 'not-started-yet' до завершения (админ создал новый маршрут, но водитель его еще не начал)
+      // ИЛИ
       // - даты изменились (даже если они раньше или в тот же день)
-      isNewRouteResult = hasDates && wasActivated && (lastRemindedIsNull || datesChanged);
+      isNewRouteResult = hasDates && wasActivated && (lastRemindedIsNull || wasNotStartedYet || datesChanged);
       
       console.log('[ROUTE_END] Проверка нового маршрута после завершения:', {
         route_status: updatedDriver.route_status,
+        currentRouteStatus_before_end: currentRouteStatus,
         hasJourneyDates,
         hasReminderDates,
         hasDates,
         wasActivated,
         lastRemindedIsNull,
+        wasNotStartedYet,
         datesChanged,
         currentStartDate,
         currentEndDate,
