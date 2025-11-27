@@ -3,6 +3,7 @@
 require('dotenv').config({ override: false });
 
 const { Telegraf, Markup } = require('telegraf');
+const express = require('express');
 const cron = require('node-cron');
 const db = require('./lib/db');
 const supabase = require('./lib/supabase');
@@ -723,107 +724,102 @@ async function sendNewRouteNotification(driver) {
   }
 }
 
-// Подписка на изменения в таблице drivers через Supabase Realtime
-function setupRealtimeSubscription() {
-  console.log('[REALTIME] Настройка подписки на изменения водителей...');
+// Настройка HTTP сервера для получения webhook от админ-панели
+function setupWebhookServer() {
+  const app = express();
   
-  try {
-    const channel = supabase
-      .channel('drivers-updates-' + Date.now()) // Уникальное имя канала для каждого экземпляра
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'drivers'
-        },
-        async (payload) => {
-          try {
-            const driver = payload.new;
-            const oldDriver = payload.old;
-            
-            console.log('[REALTIME] Получено обновление водителя:', {
-              driver_id: driver.id,
-              driver_name: driver.name,
-              old_route_status: oldDriver?.route_status,
-              new_route_status: driver.route_status,
-              old_journey_start_date: oldDriver?.journey_start_date,
-              new_journey_start_date: driver.journey_start_date,
-              old_journey_end_date: oldDriver?.journey_end_date,
-              new_journey_end_date: driver.journey_end_date,
-              old_reminder_start_date: oldDriver?.reminder_start_date,
-              new_reminder_start_date: driver.reminder_start_date,
-              old_reminder_end_date: oldDriver?.reminder_end_date,
-              new_reminder_end_date: driver.reminder_end_date,
-              telegram_chat_id: driver.telegram_chat_id
-            });
-            
-            // Проверяем, что это новый маршрут
-            // Новый маршрут определяется как:
-            // - route_status = 'not-started-yet'
-            // - journey_start_date и journey_end_date установлены (или reminder_*_date как fallback)
-            // - telegram_chat_id установлен (водитель был активирован ранее)
-            // - Старый маршрут был завершен ('stopped' или 'in-progress'), а новый 'not-started-yet'
-            // - И либо route_status изменился на 'not-started-yet', либо даты изменились
-            const wasRouteStoppedOrInProgress = oldDriver?.route_status === 'stopped' || oldDriver?.route_status === 'in-progress';
-            const isRouteStatusChanged = oldDriver?.route_status !== driver.route_status;
-            const isRouteStatusNowNotStarted = driver.route_status === 'not-started-yet';
-            
-            const isJourneyDatesChanged = 
-              oldDriver?.journey_start_date !== driver.journey_start_date ||
-              oldDriver?.journey_end_date !== driver.journey_end_date;
-            const isReminderDatesChanged = 
-              oldDriver?.reminder_start_date !== driver.reminder_start_date ||
-              oldDriver?.reminder_end_date !== driver.reminder_end_date;
-            const isDatesChanged = isJourneyDatesChanged || isReminderDatesChanged;
-            
-            // Проверяем, что это новый маршрут (не первое создание)
-            const isNewRouteResult = db.isNewRoute(driver);
-            const isActuallyNewRoute = isNewRouteResult && 
-                                      isRouteStatusNowNotStarted && 
-                                      (wasRouteStoppedOrInProgress || isDatesChanged) &&
-                                      driver.telegram_chat_id;
-            
-            console.log('[REALTIME] Анализ обновления:', {
-              driver_id: driver.id,
-              isNewRoute: isNewRouteResult,
-              wasRouteStoppedOrInProgress,
-              isRouteStatusChanged,
-              isRouteStatusNowNotStarted,
-              isDatesChanged,
-              has_telegram_chat_id: !!driver.telegram_chat_id,
-              isActuallyNewRoute
-            });
-            
-            if (isActuallyNewRoute) {
-              console.log('[REALTIME] ✅ Обнаружен новый маршрут для водителя:', driver.id, driver.name);
-              await sendNewRouteNotification(driver);
-            } else {
-              console.log('[REALTIME] Обновление не является новым маршрутом (это нормально для других изменений)');
-            }
-          } catch (error) {
-            console.error('[REALTIME] Ошибка при обработке обновления водителя:', error);
-            console.error('[REALTIME] Stack:', error.stack);
-          }
-        }
-      )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('[REALTIME] ✅ Подписка на изменения водителей активна');
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('[REALTIME] ❌ Ошибка подписки на изменения водителей');
-        } else {
-          console.log('[REALTIME] Статус подписки:', status);
-        }
+  // Middleware для парсинга JSON
+  app.use(express.json());
+  
+  // Endpoint для получения уведомлений о новом маршруте от админ-панели
+  app.post('/api/bot/notify', async (req, res) => {
+    try {
+      const { type, driverId, telegramChatId, reminderStartDate, reminderEndDate, driverName } = req.body;
+      
+      console.log('[WEBHOOK] Получено уведомление:', {
+        type,
+        driverId,
+        telegramChatId,
+        reminderStartDate,
+        reminderEndDate,
+        driverName
       });
-    
-    console.log('[REALTIME] Подписка настроена, ожидание подтверждения...');
-    return channel;
-  } catch (error) {
-    console.error('[REALTIME] ❌ Критическая ошибка при настройке подписки:', error);
-    console.error('[REALTIME] Stack:', error.stack);
-    return null;
-  }
+      
+      // Проверяем, что это уведомление о новом маршруте
+      if (type !== 'new_route') {
+        console.log('[WEBHOOK] Неверный тип уведомления:', type);
+        return res.status(400).json({ error: 'Invalid notification type' });
+      }
+      
+      // Проверяем наличие обязательных полей
+      if (!driverId || !telegramChatId || !reminderStartDate || !reminderEndDate) {
+        console.log('[WEBHOOK] Отсутствуют обязательные поля');
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+      
+      // Получаем данные водителя из БД для проверки
+      const driver = await db.getDriver(driverId);
+      if (!driver) {
+        console.log('[WEBHOOK] Водитель не найден:', driverId);
+        return res.status(404).json({ error: 'Driver not found' });
+      }
+      
+      // Проверяем, что это действительно новый маршрут
+      if (!db.isNewRoute(driver)) {
+        console.log('[WEBHOOK] Это не новый маршрут для водителя:', driverId);
+        return res.status(200).json({ 
+          success: true, 
+          message: 'Not a new route, notification skipped' 
+        });
+      }
+      
+      // Отправляем уведомление водителю
+      const startDate = db.formatDateForDriver(reminderStartDate);
+      const endDate = db.formatDateForDriver(reminderEndDate);
+      
+      console.log('[WEBHOOK] Отправка уведомления о новом маршруте водителю:', driverId, driverName || driver.name);
+      
+      await BOT.telegram.sendMessage(
+        telegramChatId,
+        `🚗 У вас новый маршрут!\n\n` +
+        `📅 Дата начала: ${startDate}\n` +
+        `📅 Дата окончания: ${endDate}\n\n` +
+        `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
+        keyboard
+      );
+      
+      // Обновляем last_reminded_date, чтобы не отправлять уведомление повторно
+      await db.markRemindedToday(telegramChatId);
+      
+      console.log('[WEBHOOK] ✅ Уведомление о новом маршруте отправлено водителю:', driverId);
+      
+      res.json({ success: true, message: 'Notification sent' });
+    } catch (error) {
+      if (error.response?.error_code === 403) {
+        // Пользователь заблокировал бота
+        console.log('[WEBHOOK] Пользователь заблокировал бота:', req.body?.telegramChatId);
+        res.status(403).json({ error: 'User blocked the bot' });
+      } else {
+        console.error('[WEBHOOK] Ошибка при обработке webhook:', error);
+        console.error('[WEBHOOK] Stack:', error.stack);
+        res.status(500).json({ error: error.message || 'Internal server error' });
+      }
+    }
+  });
+  
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'telegram-bot' });
+  });
+  
+  // Запускаем сервер
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`[WEBHOOK] ✅ HTTP сервер запущен на порту ${PORT}`);
+    console.log(`[WEBHOOK] Endpoint для уведомлений: POST http://localhost:${PORT}/api/bot/notify`);
+  });
+  
+  return app;
 }
 
 // Функция для проверки, не запущен ли уже другой экземпляр бота
@@ -899,16 +895,8 @@ async function startBotWithRetry(maxRetries = 3, delay = 5000) {
       // Инициализируем cron задачи после запуска бота
       await initializeCronJobs();
       
-      // Настраиваем Realtime подписку для уведомлений о новых маршрутах
-      const realtimeChannel = setupRealtimeSubscription();
-      if (realtimeChannel) {
-        console.log('[BOOT] Realtime подписка настроена, канал:', realtimeChannel);
-        // Даем время на установку подписки
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        console.log('[BOOT] Проверка статуса Realtime подписки завершена');
-      } else {
-        console.warn('[BOOT] ⚠️ Realtime подписка не была создана');
-      }
+      // Настраиваем HTTP сервер для получения webhook от админ-панели
+      setupWebhookServer();
       
       console.log('[BOOT] ✅ Бот успешно запущен и готов к работе');
       return;
