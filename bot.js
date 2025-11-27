@@ -189,19 +189,6 @@ BOT.start(async (ctx) => {
     // Обновляем объект driver после обновления telegram_chat_id
     driver.telegram_chat_id = ctx.from.id;
     
-    // Отправляем приветственное сообщение
-    try {
-      // Сначала отправляем сообщение с remove_keyboard чтобы убрать стандартную кнопку
-      await BOT.telegram.sendMessage(ctx.chat.id, '⏳', {
-        reply_markup: {
-          remove_keyboard: true
-        }
-      });
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } catch (err) {
-      console.log('[START] Не удалось убрать стандартную клавиатуру (это нормально):', err.message);
-    }
-    
     // Получаем актуальные данные водителя из БД после обновления telegram_chat_id
     // Это важно для корректной проверки нового маршрута
     const updatedDriver = await db.getDriverByChatId(ctx.from.id);
@@ -228,33 +215,88 @@ BOT.start(async (ctx) => {
       isNewRoute: isNewRouteResult
     });
     
+    // Сначала отправляем приветственное сообщение с remove_keyboard чтобы убрать стандартную кнопку Start
+    // Это сообщение будет удалено после отправки основного сообщения
+    let tempMessageId = null;
+    try {
+      const tempMsg = await BOT.telegram.sendMessage(ctx.chat.id, '⏳', {
+        reply_markup: {
+          remove_keyboard: true
+        }
+      });
+      tempMessageId = tempMsg.message_id;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (err) {
+      console.log('[START] Не удалось убрать стандартную клавиатуру (это нормально):', err.message);
+    }
+    
     if (isNewRouteResult) {
       console.log('[START] Обнаружен новый маршрут для водителя:', driver.id);
       // Используем journey_*_date если есть, иначе fallback на reminder_*_date
       const startDate = db.formatDateForDriver(driver.journey_start_date || driver.reminder_start_date);
       const endDate = db.formatDateForDriver(driver.journey_end_date || driver.reminder_end_date);
       
+      // Сначала отправляем приветственное сообщение
+      await ctx.reply(
+        `Привет, ${driver.name}! 👋\n\n` +
+        `Спасибо, что везёте груз Infobeta! Мы ценим вашу работу и надежность. ` +
+        `Нам важно знать ваше месторасположение во время поездки, поэтому мы будем присылать вам запросы каждый день в 9 утра.`,
+        { reply_markup: { remove_keyboard: true } }
+      );
+      
+      // Затем отправляем сообщение о новом маршруте
       await ctx.reply(
         `🚗 У вас новый маршрут!\n\n` +
         `📅 Дата начала: ${startDate}\n` +
         `📅 Дата окончания: ${endDate}\n\n` +
-        `Нажмите "📍 Отправить местоположение" чтобы начать поездку.`,
+        `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже:`,
         keyboard
       );
+      
+      // Удаляем временное сообщение
+      if (tempMessageId) {
+        try {
+          await BOT.telegram.deleteMessage(ctx.chat.id, tempMessageId);
+        } catch (err) {
+          // Игнорируем ошибки удаления
+        }
+      }
     } else if (routeStatus === 'not-started-yet') {
       // Первое создание водителя (telegram_chat_id был NULL)
       await ctx.reply(
-        `🚗 У вас новая поездка!\n\nПривет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
-        keyboard
+        `Привет, ${driver.name}! 👋\n\n` +
+        `Спасибо, что везёте груз Infobeta! Мы ценим вашу работу и надежность. ` +
+        `Нам важно знать ваше месторасположение во время поездки, поэтому мы будем присылать вам запросы каждый день в 9 утра.`,
+        { reply_markup: { remove_keyboard: true } }
       );
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
+      
+      // Удаляем временное сообщение
+      if (tempMessageId) {
+        try {
+          await BOT.telegram.deleteMessage(ctx.chat.id, tempMessageId);
+        } catch (err) {
+          // Игнорируем ошибки удаления
+        }
+      }
     } else {
       // Обычное приветствие для активного маршрута
-    await ctx.reply(
-      `Привет, ${driver.name}! 👋\n\nМы рады, что вы везёте груз Infobeta. Нам важно знать ваше месторасположение. Поэтому будем присылать вам запросы каждый день в 9 утра.`,
-      keyboard
-    );
+      await ctx.reply(
+        `Привет, ${driver.name}! 👋\n\n` +
+        `Спасибо, что везёте груз Infobeta! Мы ценим вашу работу и надежность. ` +
+        `Нам важно знать ваше месторасположение во время поездки, поэтому мы будем присылать вам запросы каждый день в 9 утра.`,
+        { reply_markup: { remove_keyboard: true } }
+      );
       await ctx.reply('📍 Пожалуйста, отправьте вашу текущую геопозицию, нажав кнопку ниже:', keyboard);
+      
+      // Удаляем временное сообщение
+      if (tempMessageId) {
+        try {
+          await BOT.telegram.deleteMessage(ctx.chat.id, tempMessageId);
+        } catch (err) {
+          // Игнорируем ошибки удаления
+        }
+      }
     }
     
     console.log('[START] Приветственное сообщение отправлено');
@@ -353,41 +395,9 @@ BOT.on('location', async (ctx) => {
       }
     }
 
-    // Проверяем, создан ли новый маршрут для водителя
-    const isNewRouteResult = db.isNewRoute(driver);
-    console.log('[LOCATION] Проверка нового маршрута:', {
-      driver_id: driver.id,
-      route_status: driver.route_status,
-      journey_start_date: driver.journey_start_date,
-      journey_end_date: driver.journey_end_date,
-      reminder_start_date: driver.reminder_start_date,
-      reminder_end_date: driver.reminder_end_date,
-      telegram_chat_id: driver.telegram_chat_id,
-      isNewRoute: isNewRouteResult
-    });
-    
-    if (isNewRouteResult) {
-      console.log('[LOCATION] Обнаружен новый маршрут для водителя:', driver.id);
-      // Используем journey_*_date если есть, иначе fallback на reminder_*_date
-      const startDate = db.formatDateForDriver(driver.journey_start_date || driver.reminder_start_date);
-      const endDate = db.formatDateForDriver(driver.journey_end_date || driver.reminder_end_date);
-      
-      try {
-        await ctx.reply(
-          `🚗 У вас новый маршрут!\n\n` +
-          `📅 Дата начала: ${startDate}\n` +
-          `📅 Дата окончания: ${endDate}\n\n` +
-          `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже.`,
-          keyboard
-        );
-      } catch (replyError) {
-        if (replyError.response?.error_code === 403) {
-          return;
-        }
-        throw replyError;
-      }
-      // Продолжаем обработку локации после уведомления
-    }
+    // УБРАНО: Проверка нового маршрута при отправке локации
+    // Сообщение о новом маршруте показывается только при /start, не при отправке локации
+    // Это предотвращает повторное показывание сообщения о новом маршруте
 
     // Проверяем, есть ли уже локации у водителя (первая локация или нет)
     const hasExistingLocations = await db.hasLocations(driver.id);
@@ -795,25 +805,113 @@ function setupRealtimeSubscription() {
   return channel;
 }
 
-// Обработка ошибки конфликта при запуске нескольких экземпляров
-BOT.launch().then(async () => {
-  console.log('Bot started (long polling)…');
-  // Инициализируем cron задачи после запуска бота
-  await initializeCronJobs();
-  // Настраиваем Realtime подписку для уведомлений о новых маршрутах
-  setupRealtimeSubscription();
-})
-  .catch((error) => {
-    if (error.response?.error_code === 409) {
-      console.error('[ERROR] Конфликт: другой экземпляр бота уже запущен!');
-      console.error('[ERROR] Убедитесь, что на Railway запущен только один экземпляр сервиса.');
-      console.error('[ERROR] Проверьте раздел Deployments и остановите старые деплои.');
-      process.exit(1);
-    } else {
-      console.error('[ERROR] Ошибка при запуске бота:', error);
-      throw error;
+// Функция для проверки, не запущен ли уже другой экземпляр бота
+async function checkForExistingInstance() {
+  try {
+    const webhookInfo = await BOT.telegram.getWebhookInfo();
+    // Если webhook установлен, значит может быть другой экземпляр
+    if (webhookInfo.url && webhookInfo.url !== '') {
+      console.log('[BOOT] Обнаружен установленный webhook:', webhookInfo.url);
+      console.log('[BOOT] Удаляем webhook для использования long polling...');
+      await BOT.telegram.deleteWebhook({ drop_pending_updates: false });
+      // Даем время на удаление webhook
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
-  });
+  } catch (error) {
+    console.warn('[BOOT] Не удалось проверить webhook (это нормально при первом запуске):', error.message);
+  }
+}
 
-process.once('SIGINT', () => BOT.stop('SIGINT'));
-process.once('SIGTERM', () => BOT.stop('SIGTERM'));
+// Функция для корректного завершения работы бота
+async function gracefulShutdown(signal) {
+  console.log(`[SHUTDOWN] Получен сигнал ${signal}, начинаем корректное завершение...`);
+  
+  try {
+    // Останавливаем бота с таймаутом
+    await Promise.race([
+      BOT.stop(signal),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), 10000)
+      )
+    ]);
+    console.log(`[SHUTDOWN] Бот корректно остановлен`);
+  } catch (error) {
+    if (error.message === 'Timeout') {
+      console.error('[SHUTDOWN] Таймаут при остановке бота, принудительное завершение');
+    } else {
+      console.error('[SHUTDOWN] Ошибка при остановке бота:', error);
+    }
+  }
+  
+  // Завершаем процесс
+  process.exit(0);
+}
+
+// Обработка сигналов завершения
+process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// Обработка необработанных ошибок
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[ERROR] Необработанное отклонение промиса:', reason);
+  console.error('[ERROR] Promise:', promise);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[ERROR] Необработанное исключение:', error);
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+// Функция для запуска бота с retry логикой
+async function startBotWithRetry(maxRetries = 3, delay = 5000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[BOOT] Попытка запуска бота ${attempt}/${maxRetries}...`);
+      
+      // Проверяем наличие других экземпляров
+      await checkForExistingInstance();
+      
+      // Запускаем бота
+      await BOT.launch();
+      console.log('[BOOT] ✅ Bot started (long polling)…');
+      
+      // Инициализируем cron задачи после запуска бота
+      await initializeCronJobs();
+      
+      // Настраиваем Realtime подписку для уведомлений о новых маршрутах
+      setupRealtimeSubscription();
+      
+      console.log('[BOOT] ✅ Бот успешно запущен и готов к работе');
+      return;
+      
+    } catch (error) {
+      const isConflict = error.response?.error_code === 409;
+      const isConflictMessage = error.message?.includes('409') || error.message?.includes('conflict');
+      
+      if (isConflict || isConflictMessage) {
+        console.error(`[BOOT] ❌ Конфликт: другой экземпляр бота уже запущен (попытка ${attempt}/${maxRetries})`);
+        
+        if (attempt < maxRetries) {
+          console.log(`[BOOT] Ожидание ${delay / 1000} секунд перед повторной попыткой...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          // Увеличиваем задержку для следующей попытки
+          delay *= 1.5;
+        } else {
+          console.error('[BOOT] ❌ Не удалось запустить бот после всех попыток');
+          console.error('[BOOT] Убедитесь, что на Railway запущен только один экземпляр сервиса.');
+          console.error('[BOOT] Проверьте раздел Deployments и остановите старые деплои.');
+          process.exit(1);
+        }
+      } else {
+        console.error('[BOOT] ❌ Ошибка при запуске бота:', error);
+        throw error;
+      }
+    }
+  }
+}
+
+// Запускаем бота с retry логикой
+startBotWithRetry().catch((error) => {
+  console.error('[BOOT] ❌ Критическая ошибка при запуске бота:', error);
+  process.exit(1);
+});
