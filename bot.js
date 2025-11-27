@@ -204,7 +204,24 @@ BOT.start(async (ctx) => {
     }
     
     // Проверяем, создан ли новый маршрут для водителя
-    const isNewRouteResult = db.isNewRoute(driver);
+    let isNewRouteResult = false;
+    try {
+      if (typeof db.isNewRoute === 'function') {
+        isNewRouteResult = db.isNewRoute(driver);
+        // Убеждаемся, что результат boolean
+        if (typeof isNewRouteResult !== 'boolean') {
+          console.error('[START] ERROR: isNewRoute вернула не boolean:', typeof isNewRouteResult, isNewRouteResult);
+          isNewRouteResult = false;
+        }
+      } else {
+        console.error('[START] ERROR: db.isNewRoute не является функцией:', typeof db.isNewRoute);
+        isNewRouteResult = false;
+      }
+    } catch (error) {
+      console.error('[START] ERROR при вызове db.isNewRoute:', error);
+      isNewRouteResult = false;
+    }
+    
     console.log('[START] Проверка нового маршрута:', {
       driver_id: driver.id,
       route_status: driver.route_status,
@@ -213,7 +230,8 @@ BOT.start(async (ctx) => {
       reminder_start_date: driver.reminder_start_date,
       reminder_end_date: driver.reminder_end_date,
       telegram_chat_id: driver.telegram_chat_id,
-      isNewRoute: isNewRouteResult === true || isNewRouteResult === false ? isNewRouteResult : 'ERROR: функция вернула не boolean'
+      last_reminded_date: driver.last_reminded_date,
+      isNewRoute: isNewRouteResult
     });
     
     // Сначала отправляем приветственное сообщение с remove_keyboard чтобы убрать стандартную кнопку Start
@@ -253,6 +271,14 @@ BOT.start(async (ctx) => {
         `Пожалуйста, отправьте вашу первую геопозицию, нажав кнопку ниже:`,
         keyboard
       );
+      
+      // Обновляем last_reminded_date, чтобы не отправлять уведомление повторно
+      try {
+        await db.markRemindedToday(ctx.chat.id);
+        console.log('[START] last_reminded_date обновлена для водителя:', driver.id);
+      } catch (error) {
+        console.error('[START] Ошибка при обновлении last_reminded_date:', error);
+      }
       
       // Удаляем временное сообщение
       if (tempMessageId) {
