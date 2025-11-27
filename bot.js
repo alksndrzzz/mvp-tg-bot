@@ -1176,17 +1176,24 @@ async function startBotWithRetry(maxRetries = 3, delay = 5000) {
       console.log(`[BOOT] Попытка запуска бота ${attempt}/${maxRetries}...`);
       
       // Проверяем наличие других экземпляров
+      console.log('[BOOT] Проверка других экземпляров...');
       await checkForExistingInstance();
+      console.log('[BOOT] Проверка завершена');
       
       // Запускаем бота
+      console.log('[BOOT] Запуск бота...');
       await BOT.launch();
       console.log('[BOOT] ✅ Bot started (long polling)…');
       
       // Инициализируем cron задачи после запуска бота
+      console.log('[BOOT] Инициализация cron задач...');
       await initializeCronJobs();
+      console.log('[BOOT] Cron задачи инициализированы');
       
       // Настраиваем HTTP сервер для получения webhook от админ-панели
+      console.log('[BOOT] Настройка HTTP сервера...');
       setupWebhookServer();
+      console.log('[BOOT] HTTP сервер настроен');
       
       console.log('[BOOT] ✅ Бот успешно запущен и готов к работе');
       return;
