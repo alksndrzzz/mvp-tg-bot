@@ -1182,8 +1182,18 @@ async function startBotWithRetry(maxRetries = 3, delay = 5000) {
       
       // Запускаем бота
       console.log('[BOOT] Запуск бота...');
-      await BOT.launch();
-      console.log('[BOOT] ✅ Bot started (long polling)…');
+      // Запускаем бота в фоне, не ждем завершения промиса
+      // BOT.launch() может не резолвиться, но бот все равно будет работать
+      BOT.launch().then(() => {
+        console.log('[BOOT] ✅ Bot started (long polling)…');
+      }).catch((error) => {
+        console.error('[BOOT] ❌ Ошибка при запуске бота:', error);
+        throw error;
+      });
+      
+      // Даем немного времени на запуск
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log('[BOOT] Бот запускается (long polling)...');
       
       // Инициализируем cron задачи после запуска бота
       console.log('[BOOT] Инициализация cron задач...');
