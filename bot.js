@@ -983,6 +983,12 @@ function setupWebhookServer() {
     
     // Endpoint для получения уведомлений о новом маршруте от админ-панели
     app.post('/api/bot/notify', async (req, res) => {
+    console.log('[WEBHOOK] ===== ПОЛУЧЕН ЗАПРОС =====');
+    console.log('[WEBHOOK] Method:', req.method);
+    console.log('[WEBHOOK] Path:', req.path);
+    console.log('[WEBHOOK] Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('[WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
+    
     try {
       const { type, driverId, telegramChatId, reminderStartDate, reminderEndDate, driverName } = req.body;
       
