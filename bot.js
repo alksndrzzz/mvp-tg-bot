@@ -216,19 +216,23 @@ BOT.start(async (ctx) => {
     }
     
     // Проверяем, создан ли новый маршрут для водителя
+    const isNewRouteResult = db.isNewRoute(driver);
     console.log('[START] Проверка нового маршрута:', {
       driver_id: driver.id,
       route_status: driver.route_status,
       journey_start_date: driver.journey_start_date,
       journey_end_date: driver.journey_end_date,
+      reminder_start_date: driver.reminder_start_date,
+      reminder_end_date: driver.reminder_end_date,
       telegram_chat_id: driver.telegram_chat_id,
-      isNewRoute: db.isNewRoute(driver)
+      isNewRoute: isNewRouteResult
     });
     
-    if (db.isNewRoute(driver)) {
+    if (isNewRouteResult) {
       console.log('[START] Обнаружен новый маршрут для водителя:', driver.id);
-      const startDate = db.formatDateForDriver(driver.journey_start_date);
-      const endDate = db.formatDateForDriver(driver.journey_end_date);
+      // Используем journey_*_date если есть, иначе fallback на reminder_*_date
+      const startDate = db.formatDateForDriver(driver.journey_start_date || driver.reminder_start_date);
+      const endDate = db.formatDateForDriver(driver.journey_end_date || driver.reminder_end_date);
       
       await ctx.reply(
         `🚗 У вас новый маршрут!\n\n` +
@@ -350,19 +354,23 @@ BOT.on('location', async (ctx) => {
     }
 
     // Проверяем, создан ли новый маршрут для водителя
+    const isNewRouteResult = db.isNewRoute(driver);
     console.log('[LOCATION] Проверка нового маршрута:', {
       driver_id: driver.id,
       route_status: driver.route_status,
       journey_start_date: driver.journey_start_date,
       journey_end_date: driver.journey_end_date,
+      reminder_start_date: driver.reminder_start_date,
+      reminder_end_date: driver.reminder_end_date,
       telegram_chat_id: driver.telegram_chat_id,
-      isNewRoute: db.isNewRoute(driver)
+      isNewRoute: isNewRouteResult
     });
     
-    if (db.isNewRoute(driver)) {
+    if (isNewRouteResult) {
       console.log('[LOCATION] Обнаружен новый маршрут для водителя:', driver.id);
-      const startDate = db.formatDateForDriver(driver.journey_start_date);
-      const endDate = db.formatDateForDriver(driver.journey_end_date);
+      // Используем journey_*_date если есть, иначе fallback на reminder_*_date
+      const startDate = db.formatDateForDriver(driver.journey_start_date || driver.reminder_start_date);
+      const endDate = db.formatDateForDriver(driver.journey_end_date || driver.reminder_end_date);
       
       try {
         await ctx.reply(
@@ -680,8 +688,9 @@ async function sendNewRouteNotification(driver) {
   }
 
   try {
-    const startDate = db.formatDateForDriver(driver.journey_start_date);
-    const endDate = db.formatDateForDriver(driver.journey_end_date);
+    // Используем journey_*_date если есть, иначе fallback на reminder_*_date
+    const startDate = db.formatDateForDriver(driver.journey_start_date || driver.reminder_start_date);
+    const endDate = db.formatDateForDriver(driver.journey_end_date || driver.reminder_end_date);
     
     console.log('[NEW_ROUTE] Отправка уведомления о новом маршруте водителю:', driver.id, driver.name);
     
@@ -729,31 +738,41 @@ function setupRealtimeSubscription() {
             old_journey_start_date: oldDriver?.journey_start_date,
             new_journey_start_date: driver.journey_start_date,
             old_journey_end_date: oldDriver?.journey_end_date,
-            new_journey_end_date: driver.journey_end_date
+            new_journey_end_date: driver.journey_end_date,
+            old_reminder_start_date: oldDriver?.reminder_start_date,
+            new_reminder_start_date: driver.reminder_start_date,
+            old_reminder_end_date: oldDriver?.reminder_end_date,
+            new_reminder_end_date: driver.reminder_end_date
           });
           
           // Проверяем, что это новый маршрут
           // Новый маршрут определяется как:
           // - route_status = 'not-started-yet'
-          // - journey_start_date и journey_end_date установлены
+          // - journey_start_date и journey_end_date установлены (или reminder_*_date как fallback)
           // - telegram_chat_id установлен (водитель был активирован)
           // - И либо route_status изменился на 'not-started-yet', либо даты изменились
           const isRouteStatusChanged = oldDriver?.route_status !== driver.route_status;
-          const isDatesChanged = 
+          const isJourneyDatesChanged = 
             oldDriver?.journey_start_date !== driver.journey_start_date ||
             oldDriver?.journey_end_date !== driver.journey_end_date;
+          const isReminderDatesChanged = 
+            oldDriver?.reminder_start_date !== driver.reminder_start_date ||
+            oldDriver?.reminder_end_date !== driver.reminder_end_date;
+          const isDatesChanged = isJourneyDatesChanged || isReminderDatesChanged;
           
           // Проверяем, что это новый маршрут (не первое создание)
-          if (db.isNewRoute(driver) && (isRouteStatusChanged || isDatesChanged)) {
+          const isNewRouteResult = db.isNewRoute(driver);
+          if (isNewRouteResult && (isRouteStatusChanged || isDatesChanged)) {
             console.log('[REALTIME] ✅ Обнаружен новый маршрут для водителя:', driver.id, driver.name);
             await sendNewRouteNotification(driver);
           } else {
             console.log('[REALTIME] Обновление не является новым маршрутом:', {
               driver_id: driver.id,
               route_status: driver.route_status,
-              has_dates: !!(driver.journey_start_date && driver.journey_end_date),
+              has_journey_dates: !!(driver.journey_start_date && driver.journey_end_date),
+              has_reminder_dates: !!(driver.reminder_start_date && driver.reminder_end_date),
               has_chat_id: !!driver.telegram_chat_id,
-              isNewRoute: db.isNewRoute(driver),
+              isNewRoute: isNewRouteResult,
               isRouteStatusChanged,
               isDatesChanged
             });
