@@ -222,7 +222,7 @@ require('dotenv').config({ override: false });
 - `db.setDriverRouteStatus(driver.id, 'not-started-yet')` - UPDATE `drivers` (если новый маршрут)
 - `db.hasLocations(driver.id)` - SELECT COUNT из `locations` WHERE `driver_id = ?`
 - `db.activateDriver(driver.id, ctx.from.id)` - UPDATE `drivers` SET `route_status = 'in-progress'`, `is_active = true`
-- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `users` WHERE `role = 'admin'`
+- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `admin_settings`
 - `db.saveLocation(driverId, lat, lon)` - INSERT в `locations`
 - `endRoute()` → `db.setDriverRouteStatus()` - UPDATE `drivers` (если дата истекла)
 
@@ -276,7 +276,7 @@ VALUES (?, ?, ?, now());
 
 **Вызовы БД:**
 - `db.getActiveDrivers()` - SELECT из `drivers` WHERE `route_status IN ('in-progress', 'not-started-yet')` AND `telegram_chat_id IS NOT NULL`
-- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `users` WHERE `role = 'admin'`
+- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `admin_settings`
 - `db.wasRemindedToday(chatId)` - SELECT `last_reminded_date` из `drivers` WHERE `telegram_chat_id = ?`
 - `db.markRemindedToday(chatId)` - UPDATE `drivers` SET `last_reminded_date = today`
 - `endRoute()` → `db.setDriverRouteStatus()` - UPDATE `drivers`
@@ -303,8 +303,8 @@ WHERE telegram_chat_id = ?;
    - Если нет → создание записи: `db.markJourneyNotificationSent(driver.id, 'ending_soon')`
 
 **Вызовы БД:**
-- `db.getAdminTimezone()` - SELECT `timezone` из `users` WHERE `role = 'admin'`
-- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `users` (для вычисления даты)
+- `db.getAdminTimezone()` - SELECT `timezone` из `admin_settings`
+- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `admin_settings` (для вычисления даты)
 - Прямой запрос к Supabase: SELECT из `drivers` WHERE `journey_end_date = ?` AND `route_status != 'stopped'`
 - `db.checkJourneyNotificationSent(driver.id, 'ending_soon')` - SELECT из `journey_notifications` WHERE `driver_id = ?` AND `notification_type = 'ending_soon'`
 - `db.markJourneyNotificationSent(driver.id, 'ending_soon')` - INSERT в `journey_notifications`
@@ -330,7 +330,7 @@ VALUES (?, 'ending_soon', now(), now());
    - Отправка сообщения водителю (если не заблокирован бот)
 
 **Вызовы БД:**
-- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `users` WHERE `role = 'admin'`
+- `db.getTodayInAdminTimezone()` - SELECT `timezone` из `admin_settings`
 - Прямой запрос к Supabase: SELECT из `drivers` WHERE `journey_end_date < ?` AND `journey_end_date IS NOT NULL` AND `route_status != 'stopped'`
 - `db.setDriverRouteStatus(driver.id, 'stopped')` - UPDATE `drivers` SET `route_status = 'stopped'`, `is_active = false`
 - `db.checkJourneyNotificationSent(driver.id, 'ended')` - SELECT из `journey_notifications`
@@ -394,13 +394,13 @@ VALUES (?, 'ended', now(), now());
 - **Возвращает:** `true` если уведомление отправлено, `false` если нет
 
 #### `getAdminTimezone()`
-- **Таблица:** `users`
-- **Запрос:** `SELECT timezone FROM users WHERE role = 'admin' LIMIT 1`
+- **Таблица:** `admin_settings`
+- **Запрос:** `SELECT timezone FROM admin_settings LIMIT 1`
 - **Возвращает:** часовой пояс админа или `'Europe/Vilnius'` по умолчанию
 
 #### `getTodayInAdminTimezone()`
-- **Таблица:** `users` (косвенно)
-- **Логика:** получает часовой пояс админа и вычисляет текущую дату в этом часовом поясе
+- **Таблица:** `admin_settings` (косвенно)
+- **Логика:** получает часовой пояс админа из `admin_settings` и вычисляет текущую дату в этом часовом поясе
 - **Возвращает:** дату в формате `YYYY-MM-DD`
 
 ### Обновление данных
