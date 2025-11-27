@@ -963,13 +963,26 @@ async function sendNewRouteNotification(driver) {
 
 // Настройка HTTP сервера для получения webhook от админ-панели
 function setupWebhookServer() {
-  const app = express();
-  
-  // Middleware для парсинга JSON
-  app.use(express.json());
-  
-  // Endpoint для получения уведомлений о новом маршруте от админ-панели
-  app.post('/api/bot/notify', async (req, res) => {
+  try {
+    console.log('[WEBHOOK] Настройка HTTP сервера...');
+    
+    const app = express();
+    
+    // Middleware для парсинга JSON
+    app.use(express.json());
+    
+    // Endpoint для корневого пути (Railway проверяет его)
+    app.get('/', (req, res) => {
+      res.json({ status: 'ok', service: 'telegram-bot', timestamp: new Date().toISOString() });
+    });
+    
+    // Health check endpoint
+    app.get('/health', (req, res) => {
+      res.json({ status: 'ok', service: 'telegram-bot' });
+    });
+    
+    // Endpoint для получения уведомлений о новом маршруте от админ-панели
+    app.post('/api/bot/notify', async (req, res) => {
     try {
       const { type, driverId, telegramChatId, reminderStartDate, reminderEndDate, driverName } = req.body;
       
@@ -1074,19 +1087,29 @@ function setupWebhookServer() {
     }
   });
   
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'telegram-bot' });
-  });
-  
   // Запускаем сервер
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
+  console.log(`[WEBHOOK] Попытка запуска HTTP сервера на порту ${PORT}...`);
+  
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[WEBHOOK] ✅ HTTP сервер запущен на порту ${PORT}`);
-    console.log(`[WEBHOOK] Endpoint для уведомлений: POST http://localhost:${PORT}/api/bot/notify`);
+    console.log(`[WEBHOOK] Endpoint для уведомлений: POST http://0.0.0.0:${PORT}/api/bot/notify`);
+    console.log(`[WEBHOOK] Health check: GET http://0.0.0.0:${PORT}/health`);
+  });
+  
+  server.on('error', (error) => {
+    console.error('[WEBHOOK] ❌ Ошибка при запуске HTTP сервера:', error);
+    if (error.code === 'EADDRINUSE') {
+      console.error(`[WEBHOOK] Порт ${PORT} уже занят. Попробуйте использовать другой порт.`);
+    }
+    throw error;
   });
   
   return app;
+  } catch (error) {
+    console.error('[WEBHOOK] ❌ Критическая ошибка при настройке webhook сервера:', error);
+    throw error;
+  }
 }
 
 // Функция для проверки, не запущен ли уже другой экземпляр бота
