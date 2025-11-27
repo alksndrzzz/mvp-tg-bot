@@ -363,6 +363,10 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
       return ctx.reply('Вы не зарегистрированы как водитель.', removeKeyboard);
     }
     
+    // Сохраняем даты текущего маршрута ДО завершения для сравнения
+    const currentStartDate = driver.reminder_start_date || driver.journey_start_date;
+    const currentEndDate = driver.reminder_end_date || driver.journey_end_date;
+    
     await endRoute(ctx.chat.id, driver.id, 'Водитель нажал кнопку "Маршрут завершён"');
     
     // Обновляем данные водителя из БД после завершения маршрута
@@ -374,7 +378,10 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
     // Проверяем, есть ли новый маршрут
     // Важно: после endRoute статус становится 'stopped', но если админ создал новый маршрут,
     // то должны быть установлены reminder_start_date и reminder_end_date
-    // Если даты установлены и они в будущем (или сегодня) - это новый маршрут
+    // Новый маршрут определяется по:
+    // 1. Есть даты (reminder_*_date или journey_*_date)
+    // 2. last_reminded_date === null (сброшен при создании нового маршрута админом) - ГЛАВНЫЙ ИНДИКАТОР
+    // 3. ИЛИ даты изменились (даже если они раньше или в тот же день - водитель мог завершить раньше)
     let isNewRouteResult = false;
     try {
       // Проверяем наличие дат нового маршрута (даже если статус 'stopped')
@@ -383,25 +390,29 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
       const hasDates = hasJourneyDates || hasReminderDates;
       const wasActivated = updatedDriver.telegram_chat_id !== null && updatedDriver.telegram_chat_id !== undefined;
       
-      // Проверяем, что даты нового маршрута в будущем или сегодня
-      // Это означает, что админ создал новый маршрут
-      let datesAreFuture = false;
+      // last_reminded_date должен быть null - это главный индикатор нового маршрута
+      // Если админ создал новый маршрут, он сбрасывает last_reminded_date в null
+      const lastRemindedIsNull = updatedDriver.last_reminded_date === null || updatedDriver.last_reminded_date === undefined;
+      
+      // Проверяем, изменились ли даты по сравнению с предыдущим маршрутом
+      // Новый маршрут может начинаться в тот же день или даже раньше, если водитель завершил предыдущий раньше
+      let datesChanged = false;
       if (hasReminderDates) {
-        const today = new Date().toISOString().slice(0, 10);
-        const startDate = updatedDriver.reminder_start_date;
-        const endDate = updatedDriver.reminder_end_date;
-        // Если дата начала в будущем или сегодня, и дата окончания в будущем или сегодня - это новый маршрут
-        datesAreFuture = (startDate >= today) && (endDate >= today);
+        const newStartDate = updatedDriver.reminder_start_date;
+        const newEndDate = updatedDriver.reminder_end_date;
+        // Даты изменились, если они отличаются от предыдущих
+        datesChanged = (newStartDate !== currentStartDate) || (newEndDate !== currentEndDate);
       } else if (hasJourneyDates) {
-        const today = new Date().toISOString().slice(0, 10);
-        const startDate = updatedDriver.journey_start_date;
-        const endDate = updatedDriver.journey_end_date;
-        datesAreFuture = (startDate >= today) && (endDate >= today);
+        const newStartDate = updatedDriver.journey_start_date;
+        const newEndDate = updatedDriver.journey_end_date;
+        datesChanged = (newStartDate !== currentStartDate) || (newEndDate !== currentEndDate);
       }
       
-      // Если есть даты, водитель активирован, и даты в будущем - это новый маршрут
-      // Не требуем last_reminded_date === null, так как он может быть установлен при предыдущем взаимодействии
-      isNewRouteResult = hasDates && wasActivated && datesAreFuture;
+      // Новый маршрут определяется по:
+      // - last_reminded_date === null (админ создал новый маршрут и сбросил его)
+      // ИЛИ
+      // - даты изменились (даже если они раньше или в тот же день)
+      isNewRouteResult = hasDates && wasActivated && (lastRemindedIsNull || datesChanged);
       
       console.log('[ROUTE_END] Проверка нового маршрута после завершения:', {
         route_status: updatedDriver.route_status,
@@ -409,7 +420,10 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
         hasReminderDates,
         hasDates,
         wasActivated,
-        datesAreFuture,
+        lastRemindedIsNull,
+        datesChanged,
+        currentStartDate,
+        currentEndDate,
         reminder_start_date: updatedDriver.reminder_start_date,
         reminder_end_date: updatedDriver.reminder_end_date,
         last_reminded_date: updatedDriver.last_reminded_date,
@@ -451,7 +465,8 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
         console.error('[ROUTE_END] Ошибка при обновлении last_reminded_date:', error);
       }
     } else {
-      // Нового маршрута нет - убираем кнопки
+      // Нового маршрута нет - убираем кнопки и оставляем статус 'stopped'
+      // НЕ обновляем статус обратно на 'not-started-yet', чтобы избежать цикла
       await ctx.reply('Спасибо, маршрут окончен. Если что - свяжитесь с администратором лично напрямую.', removeKeyboard);
     }
   } catch (error) {
