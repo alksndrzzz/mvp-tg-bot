@@ -372,26 +372,49 @@ BOT.hears('✅ Маршрут завершён', async (ctx) => {
     }
     
     // Проверяем, есть ли новый маршрут
+    // Важно: после endRoute статус становится 'stopped', но если админ создал новый маршрут,
+    // то должны быть установлены reminder_start_date и reminder_end_date, и last_reminded_date === null
     let isNewRouteResult = false;
     try {
-      if (typeof db.isNewRoute === 'function') {
-        isNewRouteResult = db.isNewRoute(updatedDriver);
-        if (typeof isNewRouteResult !== 'boolean') {
-          console.error('[ROUTE_END] ERROR: isNewRoute вернула не boolean:', typeof isNewRouteResult, isNewRouteResult);
-          isNewRouteResult = false;
-        }
-      } else {
-        console.error('[ROUTE_END] ERROR: db.isNewRoute не является функцией:', typeof db.isNewRoute);
-        isNewRouteResult = false;
-      }
+      // Проверяем наличие дат нового маршрута (даже если статус 'stopped')
+      const hasJourneyDates = updatedDriver.journey_start_date && updatedDriver.journey_end_date;
+      const hasReminderDates = updatedDriver.reminder_start_date && updatedDriver.reminder_end_date;
+      const hasDates = hasJourneyDates || hasReminderDates;
+      const wasActivated = updatedDriver.telegram_chat_id !== null && updatedDriver.telegram_chat_id !== undefined;
+      const lastRemindedIsNull = updatedDriver.last_reminded_date === null || updatedDriver.last_reminded_date === undefined;
+      
+      // Если есть даты, водитель активирован, и last_reminded_date сброшен - это новый маршрут
+      // Статус может быть 'stopped' если админ создал маршрут до завершения предыдущего
+      isNewRouteResult = hasDates && wasActivated && lastRemindedIsNull;
+      
+      console.log('[ROUTE_END] Проверка нового маршрута после завершения:', {
+        route_status: updatedDriver.route_status,
+        hasJourneyDates,
+        hasReminderDates,
+        hasDates,
+        wasActivated,
+        lastRemindedIsNull,
+        reminder_start_date: updatedDriver.reminder_start_date,
+        reminder_end_date: updatedDriver.reminder_end_date,
+        isNewRoute: isNewRouteResult
+      });
     } catch (error) {
-      console.error('[ROUTE_END] ERROR при вызове db.isNewRoute:', error);
+      console.error('[ROUTE_END] ERROR при проверке нового маршрута:', error);
       isNewRouteResult = false;
     }
     
     if (isNewRouteResult) {
-      // Есть новый маршрут - показываем кнопки и отправляем уведомление
-      console.log('[ROUTE_END] Обнаружен новый маршрут после завершения, отправляем уведомление');
+      // Есть новый маршрут - обновляем статус на 'not-started-yet' и отправляем уведомление
+      console.log('[ROUTE_END] Обнаружен новый маршрут после завершения, обновляем статус и отправляем уведомление');
+      
+      // Обновляем статус на 'not-started-yet' для нового маршрута
+      try {
+        await db.setDriverRouteStatus(updatedDriver.id, 'not-started-yet');
+        console.log('[ROUTE_END] Статус маршрута обновлен на not-started-yet для водителя:', updatedDriver.id);
+      } catch (error) {
+        console.error('[ROUTE_END] Ошибка при обновлении статуса маршрута:', error);
+      }
+      
       const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
       const endDate = db.formatDateForDriver(updatedDriver.journey_end_date || updatedDriver.reminder_end_date);
       
@@ -455,7 +478,14 @@ BOT.on('location', async (ctx) => {
     // Если маршрут остановлен, проверяем, не создан ли новый маршрут
     if (routeStatus === 'stopped') {
       // Проверяем, есть ли новый маршрут (даты установлены и водитель был активирован)
-      if (driver.journey_start_date && driver.journey_end_date && driver.telegram_chat_id) {
+      // Используем journey_*_date если есть, иначе fallback на reminder_*_date
+      const hasJourneyDates = driver.journey_start_date && driver.journey_end_date;
+      const hasReminderDates = driver.reminder_start_date && driver.reminder_end_date;
+      const hasDates = hasJourneyDates || hasReminderDates;
+      const wasActivated = driver.telegram_chat_id !== null && driver.telegram_chat_id !== undefined;
+      const lastRemindedIsNull = driver.last_reminded_date === null || driver.last_reminded_date === undefined;
+      
+      if (hasDates && wasActivated && lastRemindedIsNull) {
         // Новый маршрут создан админом - обновляем статус
         console.log('[LOCATION] Обнаружен новый маршрут после остановки, обновляем статус на not-started-yet');
         await db.setDriverRouteStatus(driver.id, 'not-started-yet');
@@ -838,20 +868,32 @@ cron.schedule('0 0 * * *', async () => {
           const updatedDriver = await db.getDriver(driver.id);
           if (updatedDriver) {
             // Проверяем, есть ли новый маршрут
+            // Важно: после остановки статус становится 'stopped', но если админ создал новый маршрут,
+            // то должны быть установлены reminder_start_date и reminder_end_date, и last_reminded_date === null
             let isNewRouteResult = false;
             try {
-              if (typeof db.isNewRoute === 'function') {
-                isNewRouteResult = db.isNewRoute(updatedDriver);
-                if (typeof isNewRouteResult !== 'boolean') {
-                  isNewRouteResult = false;
-                }
-              }
+              // Проверяем наличие дат нового маршрута (даже если статус 'stopped')
+              const hasJourneyDates = updatedDriver.journey_start_date && updatedDriver.journey_end_date;
+              const hasReminderDates = updatedDriver.reminder_start_date && updatedDriver.reminder_end_date;
+              const hasDates = hasJourneyDates || hasReminderDates;
+              const wasActivated = updatedDriver.telegram_chat_id !== null && updatedDriver.telegram_chat_id !== undefined;
+              const lastRemindedIsNull = updatedDriver.last_reminded_date === null || updatedDriver.last_reminded_date === undefined;
+              
+              // Если есть даты, водитель активирован, и last_reminded_date сброшен - это новый маршрут
+              isNewRouteResult = hasDates && wasActivated && lastRemindedIsNull;
             } catch (error) {
-              console.error('[CRON] ERROR при вызове db.isNewRoute:', error);
+              console.error('[CRON] ERROR при проверке нового маршрута:', error);
               isNewRouteResult = false;
             }
             
             if (isNewRouteResult) {
+              // Обновляем статус на 'not-started-yet' для нового маршрута
+              try {
+                await db.setDriverRouteStatus(updatedDriver.id, 'not-started-yet');
+                console.log('[CRON] Статус маршрута обновлен на not-started-yet для водителя:', updatedDriver.id);
+              } catch (error) {
+                console.error('[CRON] Ошибка при обновлении статуса маршрута:', error);
+              }
               // Есть новый маршрут - показываем кнопки и отправляем уведомление
               console.log('[CRON] Обнаружен новый маршрут после автоматической остановки, отправляем уведомление');
               const startDate = db.formatDateForDriver(updatedDriver.journey_start_date || updatedDriver.reminder_start_date);
